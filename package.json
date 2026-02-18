@@ -1,0 +1,58 @@
+{
+  "name": "bun-pyroscope",
+  "version": "0.1.0",
+  "description": "Continuous CPU profiling for Bun (JavaScriptCore) via Pyroscope ingest — zero native dependencies",
+  "author": "mewc",
+  "license": "MIT",
+  "keywords": [
+    "bun",
+    "pyroscope",
+    "profiling",
+    "continuous-profiling",
+    "flamegraph",
+    "apm",
+    "observability",
+    "javascriptcore",
+    "jsc",
+    "grafana"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "bun run build:esm && bun run build:cjs && bun run build:types",
+    "build:esm": "bun build ./src/index.ts --outfile ./dist/index.js --format esm --target node --external node:inspector --external node:os --external node:zlib --external node:util",
+    "build:cjs": "bun build ./src/index.ts --outfile ./dist/index.cjs --format cjs --target node --external node:inspector --external node:os --external node:zlib --external node:util",
+    "build:types": "tsc --emitDeclarationOnly --declaration --declarationMap --outDir dist",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src test",
+    "lint:fix": "biome check --write src test",
+    "l": "bun run typecheck && bun run lint && bun test",
+    "prepublishOnly": "bun run build && bun run l"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.3.7"
+  },
+  "trustedDependencies": [
+    "@biomejs/biome"
+  ]
+}
