@@ -54,6 +54,8 @@ jobs:
         run: bun run build
 
       - name: Publish
+        # Uses OIDC — no NPM_TOKEN secret needed.
+        # Requires one-time setup on npmjs.com:
+        #   Account → Publishing → "Allow GitHub Actions to publish packages"
+        # (or: Package Settings → Publishing after first manual publish)
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
