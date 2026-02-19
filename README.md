@@ -103,19 +103,20 @@ bun run build
 
 Signal handlers are installed automatically. On SIGTERM or SIGINT, the profiler flushes the current window and disconnects before re-emitting the signal so your process exits normally.
 
-## Publishing to npm
+## Release
 
 ```sh
-# Bump version in package.json, then:
-git tag v0.1.0
-git push origin v0.1.0
-# GitHub Actions will run CI and publish automatically
+bun run release:patch   # 0.1.0 → 0.1.1  (bug fixes)
+bun run release:minor   # 0.1.0 → 0.2.0  (new features)
+bun run release:major   # 0.1.0 → 1.0.0  (breaking changes)
 ```
 
-Or manually: `npm publish --access public`
-
-Add `NPM_TOKEN` to your GitHub repository secrets to enable CI publishing.
+Bumps `package.json`, commits, tags, and pushes. GitHub Actions publishes to npm automatically via OIDC trusted publishing — no token required.
 
 ## License
 
 MIT
+
+---
+
+Built by [mewc](https://x.com/the_mewc) · [ChartCastr](https://chartcastr.com)
