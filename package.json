@@ -1,6 +1,6 @@
 {
   "name": "bun-profiler",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Continuous CPU profiling for Bun (JavaScriptCore) via Pyroscope/Grafana ingest — zero native dependencies",
   "author": {
     "name": "mewc",
