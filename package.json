@@ -42,6 +42,7 @@
     "lint": "biome check src test",
     "lint:fix": "biome check --write src test",
     "l": "bun run typecheck && bun run lint && bun test",
+    "smoke": "bun smoke-test.ts",
     "prepublishOnly": "bun run build && bun run l"
   },
   "devDependencies": {
