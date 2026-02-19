@@ -31,11 +31,7 @@ function isRoot(functionName: string): boolean {
  * URL shortening: strip "file://" prefix, keep last 2 path segments.
  * This avoids /home/user/project/src/... noise in flamegraph labels.
  */
-function frameLabel(callFrame: {
-  functionName: string;
-  url: string;
-  lineNumber: number;
-}): string {
+function frameLabel(callFrame: { functionName: string; url: string; lineNumber: number }): string {
   const name = callFrame.functionName.trim() || "(anonymous)";
 
   if (!callFrame.url) return name;
