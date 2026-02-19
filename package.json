@@ -2,7 +2,18 @@
   "name": "bun-pyroscope",
   "version": "0.1.0",
   "description": "Continuous CPU profiling for Bun (JavaScriptCore) via Pyroscope ingest — zero native dependencies",
-  "author": "mewc",
+  "author": {
+    "name": "mewc",
+    "url": "https://x.com/the_mewc"
+  },
+  "homepage": "https://github.com/mewc/bun-profiler#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mewc/bun-profiler.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mewc/bun-profiler/issues"
+  },
   "license": "MIT",
   "keywords": [
     "bun",
@@ -43,6 +54,9 @@
     "lint:fix": "biome check --write src test",
     "l": "bun run typecheck && bun run lint && bun test",
     "smoke": "bun smoke-test.ts",
+    "release:patch": "npm version patch && git push --follow-tags",
+    "release:minor": "npm version minor && git push --follow-tags",
+    "release:major": "npm version major && git push --follow-tags",
     "prepublishOnly": "bun run build && bun run l"
   },
   "devDependencies": {

@@ -114,8 +114,20 @@ git push origin v0.1.0
 
 Or manually: `npm publish --access public`
 
-Add `NPM_TOKEN` to your GitHub repository secrets to enable CI publishing.
+## Release
+
+```sh
+bun run release:patch   # 0.1.0 → 0.1.1  (bug fixes)
+bun run release:minor   # 0.1.0 → 0.2.0  (new features)
+bun run release:major   # 0.1.0 → 1.0.0  (breaking changes)
+```
+
+Bumps `package.json`, commits, tags, pushes — GitHub Actions publishes to npm automatically via OIDC.
 
 ## License
 
 MIT
+
+---
+
+Built by [mewc](https://x.com/the_mewc) · [ChartCastr](https://chartcastr.com)
