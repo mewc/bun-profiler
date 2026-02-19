@@ -14,7 +14,7 @@ console.log(`Connecting to Pyroscope at ${pyroscopeUrl}`);
 
 const profiler = new BunPyroscope({
   pyroscopeUrl,
-  appName: "bun-pyroscope-smoke-test",
+  appName: "bun-profiler-smoke-test",
   pushIntervalMs: 5_000, // push every 5s so you see results quickly
   debug: true,
 });
@@ -45,5 +45,5 @@ while (Date.now() - start < 12_000) {
 console.log("Work done. Stopping profiler (final flush)...");
 await profiler.stop();
 console.log(
-  `\nDone! Open http://localhost:4040 in your browser and look for "bun-pyroscope-smoke-test"`
+  `\nDone! Open http://localhost:4040 in your browser and look for "bun-profiler-smoke-test"`
 );

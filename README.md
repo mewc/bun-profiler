@@ -1,4 +1,4 @@
-# bun-pyroscope
+# bun-profiler
 
 Continuous CPU profiling for [Bun](https://bun.sh) via [Pyroscope](https://pyroscope.io) / [Grafana](https://grafana.com/oss/pyroscope/) — zero native dependencies.
 
@@ -14,13 +14,13 @@ Every other Node.js profiler package (`@pyroscope/nodejs`, `@datadog/pprof`, etc
 ## Install
 
 ```sh
-bun add bun-pyroscope
+bun add bun-profiler
 ```
 
 ## Usage
 
 ```ts
-import { startProfiling } from "bun-pyroscope";
+import { startProfiling } from "bun-profiler";
 
 // Fire-and-forget — call at app startup
 startProfiling({
@@ -32,7 +32,7 @@ startProfiling({
 For manual start/stop control:
 
 ```ts
-import { BunPyroscope } from "bun-pyroscope";
+import { BunPyroscope } from "bun-profiler";
 
 const profiler = new BunPyroscope({
   pyroscopeUrl: "http://localhost:4040",
