@@ -1,6 +1,6 @@
 {
   "name": "bun-pyroscope",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Continuous CPU profiling for Bun (JavaScriptCore) via Pyroscope ingest — zero native dependencies",
   "author": "mewc",
   "license": "MIT",
