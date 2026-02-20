@@ -157,6 +157,20 @@ describe("convertToFolded", () => {
     expect(result).not.toContain("/home/user/my-project");
   });
 
+  it("formats frame with url but no lineNumber as 'name (url)'", () => {
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2] },
+        { id: 2, name: "myFunc", url: "file:///app/src/handler.ts" /* line defaults to -1 */ },
+      ],
+      [2]
+    );
+    const result = convertToFolded(profile);
+    // lineNumber -1 → no colon+line in label
+    expect(result).toContain("myFunc (src/handler.ts)");
+    expect(result).not.toMatch(/src\/handler\.ts:\d/);
+  });
+
   it("aggregates identical stacks into a single count", () => {
     const profile = makeProfile(
       [
@@ -305,6 +319,38 @@ describe("convertHeapToFolded", () => {
     const a = makeHeapNode(2, "a", 0, [b]);
     const profile = makeHeapProfile(makeHeapNode(1, "(root)", 0, [a]));
     expect(convertHeapToFolded(profile)).toBe("a;b;c;deep 999");
+  });
+
+  it("applies URL shortening (file:// stripped, last 2 path segments)", () => {
+    const leaf = makeHeapNode(
+      3,
+      "allocFn",
+      256,
+      [],
+      "file:///home/user/project/src/deep/alloc.ts",
+      10
+    );
+    const profile = makeHeapProfile(
+      makeHeapNode(1, "(root)", 0, [makeHeapNode(2, "outer", 0, [leaf])])
+    );
+    const result = convertHeapToFolded(profile);
+    expect(result).toContain("deep/alloc.ts:10");
+    expect(result).not.toContain("/home/user/project");
+  });
+
+  it("formats anonymous function as (anonymous)", () => {
+    const leaf = makeHeapNode(2, "", 128, [], "app.ts", 5);
+    const profile = makeHeapProfile(makeHeapNode(1, "(root)", 0, [leaf]));
+    expect(convertHeapToFolded(profile)).toBe("(anonymous) (app.ts:5) 128");
+  });
+
+  it("attributes selfSize of a skipped-frame node to its nearest visible ancestor", () => {
+    // (idle) is a skipped frame; its selfSize gets attributed to "parent" frame
+    const idle = makeHeapNode(3, "(idle)", 512);
+    const profile = makeHeapProfile(
+      makeHeapNode(1, "(root)", 0, [makeHeapNode(2, "parent", 0, [idle])])
+    );
+    expect(convertHeapToFolded(profile)).toBe("parent 512");
   });
 });
 
