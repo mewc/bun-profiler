@@ -34,6 +34,23 @@ export interface CdpProfile {
 }
 
 /**
+ * A node in a V8 sampling heap profile tree.
+ */
+export interface HeapProfileNode {
+  callFrame: CdpCallFrame;
+  selfSize: number;
+  id: number;
+  children: HeapProfileNode[];
+}
+
+/**
+ * Sampling heap profile as returned by HeapProfiler.stopSampling().
+ */
+export interface SamplingHeapProfile {
+  head: HeapProfileNode;
+}
+
+/**
  * Constructor options for BunPyroscope.
  */
 export interface BunPyroscopeOptions {
@@ -93,6 +110,15 @@ export interface BunPyroscopeOptions {
    * Default: false
    */
   debug?: boolean;
+
+  /**
+   * Heap allocation sampling options (opt-in).
+   */
+  heap?: {
+    enabled: boolean;
+    /** Bytes between samples. Default: 32768 (32 KB, V8 default). */
+    samplingIntervalBytes?: number;
+  };
 }
 
 /** Internal fully-resolved configuration with all defaults applied. */
@@ -106,4 +132,5 @@ export interface ResolvedConfig {
   basicAuth: { username: string; password: string } | undefined;
   maxRetries: number;
   debug: boolean;
+  heap: { enabled: boolean; samplingIntervalBytes: number };
 }

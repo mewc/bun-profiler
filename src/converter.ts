@@ -1,4 +1,4 @@
-import type { CdpProfile } from "./types.js";
+import type { CdpProfile, HeapProfileNode, SamplingHeapProfile } from "./types.js";
 
 /**
  * Frames that should be excluded from folded stacks.
@@ -130,6 +130,42 @@ export function convertToFolded(profile: CdpProfile): string {
   return Array.from(stackCounts.entries())
     .map(([stack, count]) => `${stack} ${count}`)
     .join("\n");
+}
+
+/**
+ * Convert a V8 sampling heap profile to Pyroscope's folded/collapsed stack format.
+ *
+ * The heap profile is a tree where each node holds `selfSize` bytes allocated
+ * directly in that frame. We walk root→leaf, collecting non-skipped frame labels,
+ * and emit a line for each node with selfSize > 0.
+ *
+ * No reversal needed — tree traversal already goes root→leaf order.
+ *
+ * @returns Folded stack string, or "" if the profile has no allocations.
+ */
+export function convertHeapToFolded(profile: SamplingHeapProfile): string {
+  const lines: string[] = [];
+
+  function walk(node: HeapProfileNode, frames: string[]): void {
+    const { functionName, url } = node.callFrame;
+
+    const nextFrames =
+      isRoot(functionName) || shouldSkipFrame(functionName, url)
+        ? frames
+        : [...frames, frameLabel(node.callFrame)];
+
+    if (node.selfSize > 0 && nextFrames.length > 0) {
+      lines.push(`${nextFrames.join(";")} ${node.selfSize}`);
+    }
+
+    for (const child of node.children) {
+      walk(child, nextFrames);
+    }
+  }
+
+  walk(profile.head, []);
+
+  return lines.join("\n");
 }
 
 /**
