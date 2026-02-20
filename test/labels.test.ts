@@ -199,4 +199,18 @@ describe("encodePyroscopeName", () => {
     });
     expect(result).toBe("svc.cpu{environment=production,hostname=web-1,service_version=1.0.0}");
   });
+
+  it("uses custom type param with no labels", () => {
+    expect(encodePyroscopeName("app", {}, "alloc_space")).toBe("app.alloc_space");
+  });
+
+  it("uses custom type param with labels", () => {
+    expect(encodePyroscopeName("app", { env: "prod" }, "alloc_space")).toBe(
+      "app.alloc_space{env=prod}"
+    );
+  });
+
+  it("defaults to cpu type when type param is omitted", () => {
+    expect(encodePyroscopeName("app", {})).toBe("app.cpu");
+  });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { calculateSampleRate, convertToFolded } from "../src/converter";
-import type { CdpProfile } from "../src/types";
+import { calculateSampleRate, convertHeapToFolded, convertToFolded } from "../src/converter";
+import type { CdpProfile, HeapProfileNode, SamplingHeapProfile } from "../src/types";
 
 /** Build a minimal CdpProfile from a flat node description. */
 function makeProfile(
@@ -210,6 +210,101 @@ describe("convertToFolded", () => {
     );
     // Should produce empty output (no crash)
     expect(convertToFolded(profile)).toBe("");
+  });
+});
+
+/** Build a minimal HeapProfileNode. */
+function makeHeapNode(
+  id: number,
+  name: string,
+  selfSize: number,
+  children: HeapProfileNode[] = [],
+  url = "",
+  line = -1
+): HeapProfileNode {
+  return {
+    id,
+    selfSize,
+    callFrame: {
+      functionName: name,
+      scriptId: "1",
+      url,
+      lineNumber: line,
+      columnNumber: -1,
+    },
+    children,
+  };
+}
+
+function makeHeapProfile(head: HeapProfileNode): SamplingHeapProfile {
+  return { head };
+}
+
+describe("convertHeapToFolded", () => {
+  it("returns empty string when no node has selfSize > 0", () => {
+    const profile = makeHeapProfile(
+      makeHeapNode(1, "(root)", 0, [makeHeapNode(2, "parent", 0, [makeHeapNode(3, "leaf", 0)])])
+    );
+    expect(convertHeapToFolded(profile)).toBe("");
+  });
+
+  it("returns single line for a leaf with selfSize", () => {
+    const profile = makeHeapProfile(
+      makeHeapNode(1, "(root)", 0, [makeHeapNode(2, "parent", 0, [makeHeapNode(3, "leaf", 512)])])
+    );
+    expect(convertHeapToFolded(profile)).toBe("parent;leaf 512");
+  });
+
+  it("skips (root) and (idle) frames", () => {
+    const profile = makeHeapProfile(
+      makeHeapNode(1, "(root)", 0, [makeHeapNode(2, "(idle)", 1024)])
+    );
+    // (idle) selfSize is > 0 but shouldSkipFrame drops it, so nextFrames stays []
+    expect(convertHeapToFolded(profile)).toBe("");
+  });
+
+  it("skips node:inspector frames but continues into children", () => {
+    const leaf = makeHeapNode(4, "userAlloc", 256);
+    const inspector = makeHeapNode(3, "internal", 0, [leaf], "node:inspector");
+    const root = makeHeapNode(1, "(root)", 0, [makeHeapNode(2, "parent", 0, [inspector])]);
+    const profile = makeHeapProfile(root);
+    const result = convertHeapToFolded(profile);
+    expect(result).not.toContain("node:inspector");
+    expect(result).not.toContain("internal");
+    expect(result).toContain("parent");
+    expect(result).toContain("userAlloc");
+  });
+
+  it("attributes selfSize on an intermediate (non-leaf) node correctly", () => {
+    const child = makeHeapNode(3, "child", 128);
+    const middle = makeHeapNode(2, "middle", 64, [child]);
+    const profile = makeHeapProfile(makeHeapNode(1, "(root)", 0, [middle]));
+    const result = convertHeapToFolded(profile);
+    const lines = result.split("\n");
+    expect(lines).toContain("middle 64");
+    expect(lines).toContain("middle;child 128");
+  });
+
+  it("emits separate lines for multiple branches", () => {
+    const branchA = makeHeapNode(3, "allocA", 100);
+    const branchB = makeHeapNode(4, "allocB", 200);
+    const profile = makeHeapProfile(
+      makeHeapNode(1, "(root)", 0, [makeHeapNode(2, "parent", 0, [branchA, branchB])])
+    );
+    const result = convertHeapToFolded(profile);
+    const lines = result.split("\n");
+    expect(lines).toContain("parent;allocA 100");
+    expect(lines).toContain("parent;allocB 200");
+    expect(lines).toHaveLength(2);
+  });
+
+  it("handles deeply nested tree", () => {
+    const deep = makeHeapNode(5, "deep", 999);
+    const c = makeHeapNode(4, "c", 0, [deep]);
+    const b = makeHeapNode(3, "b", 0, [c]);
+    const a = makeHeapNode(2, "a", 0, [b]);
+    const profile = makeHeapProfile(makeHeapNode(1, "(root)", 0, [a]));
+    expect(convertHeapToFolded(profile)).toBe("a;b;c;deep 999");
   });
 });
 

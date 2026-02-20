@@ -1,5 +1,12 @@
 export { BunPyroscope } from "./profiler.js";
-export type { BunPyroscopeOptions, CdpCallFrame, CdpNode, CdpProfile } from "./types.js";
+export type {
+  BunPyroscopeOptions,
+  CdpCallFrame,
+  CdpNode,
+  CdpProfile,
+  HeapProfileNode,
+  SamplingHeapProfile,
+} from "./types.js";
 
 import { BunPyroscope } from "./profiler.js";
 import type { BunPyroscopeOptions } from "./types.js";

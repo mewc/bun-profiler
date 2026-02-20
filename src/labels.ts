@@ -67,9 +67,13 @@ export function buildDefaultLabels(appName: string): Record<string, string> {
  *   encodePyroscopeName("myapp", {}) → "myapp.cpu"
  *   encodePyroscopeName("myapp", {env: "prod", host: "web-1"}) → "myapp.cpu{env=prod,host=web-1}"
  */
-export function encodePyroscopeName(appName: string, labels: Record<string, string>): string {
+export function encodePyroscopeName(
+  appName: string,
+  labels: Record<string, string>,
+  type = "cpu"
+): string {
   const entries = Object.entries(labels);
-  if (entries.length === 0) return `${appName}.cpu`;
+  if (entries.length === 0) return `${appName}.${type}`;
 
   entries.sort(([a], [b]) => a.localeCompare(b));
   const labelStr = entries
@@ -80,5 +84,5 @@ export function encodePyroscopeName(appName: string, labels: Record<string, stri
     })
     .join(",");
 
-  return `${appName}.cpu{${labelStr}}`;
+  return `${appName}.${type}{${labelStr}}`;
 }
