@@ -45,7 +45,7 @@ export function buildDefaultLabels(appName: string): Record<string, string> {
     service_name: appName,
   };
 
-  const env = process.env["NODE_ENV"] ?? process.env["BUN_ENV"];
+  const env = process.env.NODE_ENV ?? process.env.BUN_ENV;
   if (env) labels.environment = env;
 
   const version = process.env.SERVICE_VERSION ?? process.env.npm_package_version;

@@ -23,8 +23,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          # registry-url intentionally omitted — it writes _authToken=${NODE_AUTH_TOKEN}
-          # to .npmrc which blocks OIDC trusted publishing when NODE_AUTH_TOKEN is unset
+          registry-url: "https://registry.npmjs.org"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -37,5 +36,3 @@ jobs:
 
       - name: Publish
         run: npm publish --provenance --access public
-        env:
-          npm_config_registry: https://registry.npmjs.org/

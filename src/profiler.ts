@@ -39,6 +39,7 @@ export class BunPyroscope {
   private running = false;
   private windowStart = 0;
   private signalHandlersInstalled = false;
+  private inFlightPushes = new Set<Promise<void>>();
 
   constructor(options: BunPyroscopeOptions) {
     const appName = resolveAppName(options.appName);
@@ -117,6 +118,8 @@ export class BunPyroscope {
       this.log("warn", `Final flush failed: ${err}`);
     });
 
+    await Promise.allSettled([...this.inFlightPushes]);
+
     if (this.session) {
       if (this.config.heap.enabled) {
         try {
@@ -177,17 +180,27 @@ export class BunPyroscope {
       this.log("debug", `Empty profile for window [${this.windowStart}-${windowEnd}], skipping`);
     } else {
       const sampleRate = calculateSampleRate(profile);
-      // Fire-and-forget push — never block the profiling loop
-      this.pushWithRetry(folded, this.windowStart, windowEnd, sampleRate).catch((err) => {
-        this.log("error", `All retries exhausted for [${this.windowStart}-${windowEnd}]: ${err}`);
-      });
+      // Push is non-blocking so the profiling loop can start the next window immediately,
+      // but we track the promise so stop() can await delivery before disconnecting.
+      this.trackPush(
+        this.pushWithRetry(folded, this.windowStart, windowEnd, sampleRate).catch((err) => {
+          this.log("error", `All retries exhausted for [${this.windowStart}-${windowEnd}]: ${err}`);
+        })
+      );
     }
 
     if (this.config.heap.enabled) {
-      this.flushHeapWindow(this.windowStart, windowEnd).catch((err) => {
-        this.log("error", `Heap flush failed for [${this.windowStart}-${windowEnd}]: ${err}`);
-      });
+      this.trackPush(
+        this.flushHeapWindow(this.windowStart, windowEnd).catch((err) => {
+          this.log("error", `Heap flush failed for [${this.windowStart}-${windowEnd}]: ${err}`);
+        })
+      );
     }
+  }
+
+  private trackPush(p: Promise<void>): void {
+    this.inFlightPushes.add(p);
+    p.finally(() => this.inFlightPushes.delete(p));
   }
 
   private async flushHeapWindow(windowStart: number, windowEnd: number): Promise<void> {
@@ -218,7 +231,7 @@ export class BunPyroscope {
       return;
     }
 
-    this.pushWithRetry(folded, windowStart, windowEnd, 1, "alloc_space").catch((err) => {
+    await this.pushWithRetry(folded, windowStart, windowEnd, 1, "alloc_space").catch((err) => {
       this.log("error", `Heap push failed for [${windowStart}-${windowEnd}]: ${err}`);
     });
   }
