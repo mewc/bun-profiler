@@ -453,6 +453,71 @@ describe("auth headers", () => {
   });
 });
 
+// ---------- wall-time profiling ----------
+
+describe("wall-time profiling", () => {
+  it("does NOT push wall-time data when wallTime is disabled (default)", async () => {
+    profiler = new BunPyroscope(BASE);
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    const calls = _fetchMock.mock.calls as Array<[string, ...unknown[]]>;
+    const wallPush = calls.find(([url]) => (url as string).includes(".wall"));
+    expect(wallPush).toBeUndefined();
+  });
+
+  it("pushes wall-time data to 'wall' stream when enabled", async () => {
+    profiler = new BunPyroscope({ ...BASE, wallTime: { enabled: true } });
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    const calls = _fetchMock.mock.calls as Array<[string, ...unknown[]]>;
+    const wallPush = calls.find(([url]) => (url as string).includes(".wall"));
+    expect(wallPush).toBeTruthy();
+  });
+
+  it("pushes both CPU and wall-time streams when wallTime is enabled", async () => {
+    profiler = new BunPyroscope({ ...BASE, wallTime: { enabled: true } });
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    const calls = _fetchMock.mock.calls as Array<[string, ...unknown[]]>;
+    const cpuPush = calls.find(([url]) => (url as string).includes(".cpu"));
+    const wallPush = calls.find(([url]) => (url as string).includes(".wall"));
+    expect(cpuPush).toBeTruthy();
+    expect(wallPush).toBeTruthy();
+  });
+
+  it("uses sampleRate=1000000 for wall-time pushes", async () => {
+    profiler = new BunPyroscope({ ...BASE, wallTime: { enabled: true } });
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    const calls = _fetchMock.mock.calls as Array<[string, ...unknown[]]>;
+    const wallPush = calls.find(([url]) => (url as string).includes(".wall"));
+    expect(wallPush).toBeTruthy();
+    const url = wallPush?.[0] as string;
+    expect(url).toContain("sampleRate=1000000");
+  });
+
+  it("does not require separate CDP calls — reuses the CPU profile data", async () => {
+    profiler = new BunPyroscope({ ...BASE, wallTime: { enabled: true } });
+    await profiler.start();
+    _postCalls.length = 0;
+
+    await profiler.stop();
+    profiler = null;
+
+    // Wall-time should NOT add any extra Profiler.stop calls
+    const stopCalls = _postCalls.filter((c) => c.method === "Profiler.stop");
+    expect(stopCalls).toHaveLength(1);
+  });
+});
+
 // ---------- timer auto-cycle ----------
 
 describe("push interval timer", () => {

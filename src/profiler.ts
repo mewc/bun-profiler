@@ -1,7 +1,12 @@
 import { Session } from "node:inspector/promises";
 import { promisify } from "node:util";
 import { gzip } from "node:zlib";
-import { calculateSampleRate, convertHeapToFolded, convertToFolded } from "./converter.js";
+import {
+  calculateSampleRate,
+  convertHeapToFolded,
+  convertToFolded,
+  convertToFoldedWallTime,
+} from "./converter.js";
 import { buildDefaultLabels, encodePyroscopeName, resolveAppName } from "./labels.js";
 import type {
   BunPyroscopeOptions,
@@ -58,6 +63,9 @@ export class BunPyroscope {
       heap: {
         enabled: options.heap?.enabled ?? false,
         samplingIntervalBytes: options.heap?.samplingIntervalBytes ?? 32_768,
+      },
+      wallTime: {
+        enabled: options.wallTime?.enabled ?? false,
       },
     };
   }
@@ -187,6 +195,27 @@ export class BunPyroscope {
           this.log("error", `All retries exhausted for [${this.windowStart}-${windowEnd}]: ${err}`);
         })
       );
+    }
+
+    if (this.config.wallTime.enabled) {
+      const wallFolded = convertToFoldedWallTime(profile);
+      if (!wallFolded) {
+        this.log(
+          "debug",
+          `Empty wall-time profile for window [${this.windowStart}-${windowEnd}], skipping`
+        );
+      } else {
+        this.trackPush(
+          this.pushWithRetry(wallFolded, this.windowStart, windowEnd, 1_000_000, "wall").catch(
+            (err) => {
+              this.log(
+                "error",
+                `Wall-time push failed for [${this.windowStart}-${windowEnd}]: ${err}`
+              );
+            }
+          )
+        );
+      }
     }
 
     if (this.config.heap.enabled) {

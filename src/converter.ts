@@ -1,13 +1,23 @@
 import type { CdpProfile, HeapProfileNode, SamplingHeapProfile } from "./types.js";
 
 /**
- * Frames that should be excluded from folded stacks.
+ * Frames that should be excluded from CPU-time folded stacks.
  * - "(root)" is always the tree root — not a real frame.
  * - "(idle)" indicates the event loop had nothing to do.
  * - node:inspector frames are the profiler's own overhead.
  */
 function shouldSkipFrame(functionName: string, url: string): boolean {
   if (functionName === "(root)" || functionName === "(idle)") return true;
+  if (url === "node:inspector") return true;
+  return false;
+}
+
+/**
+ * Wall-time variant: keeps "(idle)" visible so I/O wait time appears in
+ * flamegraphs, but still skips "(root)" and node:inspector overhead.
+ */
+function shouldSkipFrameWallTime(functionName: string, url: string): boolean {
+  if (functionName === "(root)") return true;
   if (url === "node:inspector") return true;
   return false;
 }
@@ -129,6 +139,84 @@ export function convertToFolded(profile: CdpProfile): string {
 
   return Array.from(stackCounts.entries())
     .map(([stack, count]) => `${stack} ${count}`)
+    .join("\n");
+}
+
+/**
+ * Convert a CDP CPU profile to Pyroscope's folded/collapsed stack format
+ * weighted by wall-clock time (microseconds) instead of sample count.
+ *
+ * Unlike convertToFolded (which counts samples and drops idle), this function:
+ *   - Weights each sample by its timeDeltas[i] value (actual elapsed µs)
+ *   - Keeps "(idle)" frames visible so I/O wait time shows in flamegraphs
+ *
+ * For I/O-heavy servers, this reveals where wall-clock time actually goes —
+ * waiting on external APIs, databases, etc. — rather than just on-CPU work.
+ *
+ * Values in the output are microseconds of wall-clock time.
+ *
+ * @returns Folded stack string, or "" if the profile has no usable samples.
+ */
+export function convertToFoldedWallTime(profile: CdpProfile): string {
+  const { nodes, samples, timeDeltas } = profile;
+
+  if (!samples || samples.length === 0) return "";
+  if (!timeDeltas || timeDeltas.length === 0) return "";
+
+  // Step 1: id → node
+  const nodeMap = new Map<number, (typeof nodes)[number]>();
+  for (const node of nodes) nodeMap.set(node.id, node);
+
+  // Step 2: child → parent
+  const parentMap = new Map<number, number>();
+  for (const node of nodes) {
+    if (node.children) {
+      for (const childId of node.children) {
+        parentMap.set(childId, node.id);
+      }
+    }
+  }
+
+  // Step 3: accumulate wall-time per unique stack
+  const stackTime = new Map<string, number>();
+  const MAX_DEPTH = 512;
+
+  for (let i = 0; i < samples.length; i++) {
+    const leafId = samples[i];
+    // timeDeltas[0] is typically 0 (first sample); use abs to handle negatives
+    const deltaUs = Math.abs(timeDeltas[i] ?? 0);
+    if (deltaUs === 0) continue;
+
+    const frames: string[] = [];
+    let currentId: number | undefined = leafId;
+    let depth = 0;
+
+    while (currentId !== undefined && depth < MAX_DEPTH) {
+      const node = nodeMap.get(currentId);
+      if (!node) break;
+
+      const { functionName, url } = node.callFrame;
+
+      if (isRoot(functionName)) break;
+
+      if (!shouldSkipFrameWallTime(functionName, url)) {
+        frames.push(frameLabel(node.callFrame));
+      }
+
+      currentId = parentMap.get(currentId);
+      depth++;
+    }
+
+    frames.reverse();
+
+    if (frames.length === 0) continue;
+
+    const stackStr = frames.join(";");
+    stackTime.set(stackStr, (stackTime.get(stackStr) ?? 0) + deltaUs);
+  }
+
+  return Array.from(stackTime.entries())
+    .map(([stack, timeUs]) => `${stack} ${timeUs}`)
     .join("\n");
 }
 

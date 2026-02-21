@@ -119,6 +119,21 @@ export interface BunPyroscopeOptions {
     /** Bytes between samples. Default: 32768 (32 KB, V8 default). */
     samplingIntervalBytes?: number;
   };
+
+  /**
+   * Wall-time profiling options (opt-in).
+   *
+   * When enabled, pushes an additional "wall" profile stream alongside CPU.
+   * Wall-time profiles weight stacks by elapsed wall-clock microseconds
+   * (via CDP timeDeltas) rather than sample count, and keep "(idle)" frames
+   * visible so I/O wait time appears in flamegraphs.
+   *
+   * This is the highest-value profiling mode for I/O-heavy servers that spend
+   * most time waiting on external APIs, databases, or network calls.
+   */
+  wallTime?: {
+    enabled: boolean;
+  };
 }
 
 /** Internal fully-resolved configuration with all defaults applied. */
@@ -133,4 +148,5 @@ export interface ResolvedConfig {
   maxRetries: number;
   debug: boolean;
   heap: { enabled: boolean; samplingIntervalBytes: number };
+  wallTime: { enabled: boolean };
 }
