@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
-/** Wait for fire-and-forget pushes (gzipAsync is a libuv callback, not a microtask). */
+/** Wait for any remaining microtasks / libuv callbacks (e.g. after tag() which doesn't await pushes). */
 async function flushAsync() {
   await new Promise<void>((r) => setTimeout(r, 20));
 }
@@ -174,7 +174,6 @@ describe("tag()", () => {
     _fetchMock.mockClear();
     await profiler.stop();
     profiler = null;
-    await flushAsync();
 
     const calls = _fetchMock.mock.calls as Array<[string, ...unknown[]]>;
     // All stop-flush URLs must use original labels (no route=)
@@ -352,7 +351,6 @@ describe("ingest URL", () => {
     await profiler.start();
     await profiler.stop();
     profiler = null;
-    await flushAsync();
 
     const calls = _fetchMock.mock.calls as Array<[string, ...unknown[]]>;
     expect(calls.length).toBeGreaterThan(0);
@@ -404,7 +402,6 @@ describe("ingest URL", () => {
     await profiler.start();
     await profiler.stop();
     profiler = null;
-    await flushAsync();
 
     const calls = _fetchMock.mock.calls as Array<[string, ...unknown[]]>;
     const heapPush = calls.find(([url]) => (url as string).includes("alloc_space"));
@@ -420,7 +417,6 @@ describe("auth headers", () => {
     await profiler.start();
     await profiler.stop();
     profiler = null;
-    await flushAsync();
 
     const calls = _fetchMock.mock.calls as Array<[string, RequestInit]>;
     expect(calls.length).toBeGreaterThan(0);
@@ -436,7 +432,6 @@ describe("auth headers", () => {
     await profiler.start();
     await profiler.stop();
     profiler = null;
-    await flushAsync();
 
     const calls = _fetchMock.mock.calls as Array<[string, RequestInit]>;
     expect(calls.length).toBeGreaterThan(0);
@@ -450,7 +445,6 @@ describe("auth headers", () => {
     await profiler.start();
     await profiler.stop();
     profiler = null;
-    await flushAsync();
 
     const calls = _fetchMock.mock.calls as Array<[string, RequestInit]>;
     expect(calls.length).toBeGreaterThan(0);
@@ -493,7 +487,6 @@ describe("push failure handling", () => {
     await profiler.start();
     await profiler.stop();
     profiler = null;
-    await flushAsync();
 
     // Fetch was called (push attempted) and profiler didn't throw
     expect(fetchCallCount).toBeGreaterThan(0);
