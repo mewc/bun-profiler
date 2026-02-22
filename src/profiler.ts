@@ -1,4 +1,4 @@
-import { Session } from "node:inspector/promises";
+import type { Session } from "node:inspector/promises";
 import { promisify } from "node:util";
 import { gzip } from "node:zlib";
 import {
@@ -79,8 +79,18 @@ export class BunPyroscope {
       return;
     }
 
-    this.session = new Session();
-    this.session.connect();
+    try {
+      const mod = await import("node:inspector/promises");
+      if (!mod.Session) throw new Error("Session export missing");
+      this.session = new mod.Session();
+      this.session.connect();
+    } catch {
+      this.session = null;
+      throw new Error(
+        "[bun-pyroscope] node:inspector/promises is not available in this runtime. " +
+          "CPU profiling requires Node.js or a Bun version with inspector support."
+      );
+    }
 
     try {
       await this.session.post("Profiler.enable");

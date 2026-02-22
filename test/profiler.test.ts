@@ -15,10 +15,12 @@ let _postFn: PostFn = async () => ({});
 let _connectCalls = 0;
 let _disconnectCalls = 0;
 const _postCalls: Array<{ method: string; params?: unknown }> = [];
+let _inspectorAvailable = true;
 
 mock.module("node:inspector/promises", () => ({
   Session: class {
     connect() {
+      if (!_inspectorAvailable) throw new Error("NotImplementedError");
       _connectCalls++;
     }
     disconnect() {
@@ -112,6 +114,7 @@ beforeEach(() => {
   _postCalls.length = 0;
   _fetchMock.mockClear();
   _postFn = defaultPost;
+  _inspectorAvailable = true;
   profiler = null;
 });
 
@@ -535,6 +538,55 @@ describe("push interval timer", () => {
     // Also verify the window restarts (Profiler.start re-called)
     const startCalls = _postCalls.filter((c) => c.method === "Profiler.start");
     expect(startCalls.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ---------- unavailable inspector ----------
+
+describe("start() when node:inspector/promises is unavailable", () => {
+  // Use the _inspectorAvailable flag to toggle Session availability
+  // within the shared mock. The mock uses a getter so it checks the flag
+  // each time start() dynamically imports the module.
+
+  beforeEach(() => {
+    _inspectorAvailable = false;
+  });
+
+  afterEach(() => {
+    _inspectorAvailable = true;
+  });
+
+  it("constructor succeeds — no side effects until start()", () => {
+    const p = new BunPyroscope(BASE);
+    expect(p).toBeInstanceOf(BunPyroscope);
+  });
+
+  it("throws a clear error mentioning the runtime limitation", async () => {
+    const p = new BunPyroscope(BASE);
+    await expect(p.start()).rejects.toThrow(
+      "node:inspector/promises is not available in this runtime"
+    );
+  });
+
+  it("stop() is safe to call after start() fails", async () => {
+    const p = new BunPyroscope(BASE);
+    await expect(p.start()).rejects.toThrow();
+    await expect(p.stop()).resolves.toBeUndefined();
+  });
+
+  it("stop() is safe to call even if start() was never called", async () => {
+    const p = new BunPyroscope(BASE);
+    await expect(p.stop()).resolves.toBeUndefined();
+  });
+
+  it("profiler works normally after inspector is restored", async () => {
+    const p1 = new BunPyroscope(BASE);
+    await expect(p1.start()).rejects.toThrow();
+
+    _inspectorAvailable = true;
+    profiler = new BunPyroscope(BASE);
+    await profiler.start();
+    expect(_connectCalls).toBeGreaterThan(0);
   });
 });
 
