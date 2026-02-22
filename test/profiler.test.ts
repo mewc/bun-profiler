@@ -15,10 +15,12 @@ let _postFn: PostFn = async () => ({});
 let _connectCalls = 0;
 let _disconnectCalls = 0;
 const _postCalls: Array<{ method: string; params?: unknown }> = [];
+let _inspectorAvailable = true;
 
 mock.module("node:inspector/promises", () => ({
   Session: class {
     connect() {
+      if (!_inspectorAvailable) throw new Error("NotImplementedError");
       _connectCalls++;
     }
     disconnect() {
@@ -112,6 +114,7 @@ beforeEach(() => {
   _postCalls.length = 0;
   _fetchMock.mockClear();
   _postFn = defaultPost;
+  _inspectorAvailable = true;
   profiler = null;
 });
 
@@ -453,6 +456,71 @@ describe("auth headers", () => {
   });
 });
 
+// ---------- wall-time profiling ----------
+
+describe("wall-time profiling", () => {
+  it("does NOT push wall-time data when wallTime is disabled (default)", async () => {
+    profiler = new BunPyroscope(BASE);
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    const calls = _fetchMock.mock.calls as Array<[string, ...unknown[]]>;
+    const wallPush = calls.find(([url]) => (url as string).includes(".wall"));
+    expect(wallPush).toBeUndefined();
+  });
+
+  it("pushes wall-time data to 'wall' stream when enabled", async () => {
+    profiler = new BunPyroscope({ ...BASE, wallTime: { enabled: true } });
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    const calls = _fetchMock.mock.calls as Array<[string, ...unknown[]]>;
+    const wallPush = calls.find(([url]) => (url as string).includes(".wall"));
+    expect(wallPush).toBeTruthy();
+  });
+
+  it("pushes both CPU and wall-time streams when wallTime is enabled", async () => {
+    profiler = new BunPyroscope({ ...BASE, wallTime: { enabled: true } });
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    const calls = _fetchMock.mock.calls as Array<[string, ...unknown[]]>;
+    const cpuPush = calls.find(([url]) => (url as string).includes(".cpu"));
+    const wallPush = calls.find(([url]) => (url as string).includes(".wall"));
+    expect(cpuPush).toBeTruthy();
+    expect(wallPush).toBeTruthy();
+  });
+
+  it("uses sampleRate=1000000 for wall-time pushes", async () => {
+    profiler = new BunPyroscope({ ...BASE, wallTime: { enabled: true } });
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    const calls = _fetchMock.mock.calls as Array<[string, ...unknown[]]>;
+    const wallPush = calls.find(([url]) => (url as string).includes(".wall"));
+    expect(wallPush).toBeTruthy();
+    const url = wallPush?.[0] as string;
+    expect(url).toContain("sampleRate=1000000");
+  });
+
+  it("does not require separate CDP calls — reuses the CPU profile data", async () => {
+    profiler = new BunPyroscope({ ...BASE, wallTime: { enabled: true } });
+    await profiler.start();
+    _postCalls.length = 0;
+
+    await profiler.stop();
+    profiler = null;
+
+    // Wall-time should NOT add any extra Profiler.stop calls
+    const stopCalls = _postCalls.filter((c) => c.method === "Profiler.stop");
+    expect(stopCalls).toHaveLength(1);
+  });
+});
+
 // ---------- timer auto-cycle ----------
 
 describe("push interval timer", () => {
@@ -470,6 +538,55 @@ describe("push interval timer", () => {
     // Also verify the window restarts (Profiler.start re-called)
     const startCalls = _postCalls.filter((c) => c.method === "Profiler.start");
     expect(startCalls.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ---------- unavailable inspector ----------
+
+describe("start() when node:inspector/promises is unavailable", () => {
+  // Use the _inspectorAvailable flag to toggle Session availability
+  // within the shared mock. The mock uses a getter so it checks the flag
+  // each time start() dynamically imports the module.
+
+  beforeEach(() => {
+    _inspectorAvailable = false;
+  });
+
+  afterEach(() => {
+    _inspectorAvailable = true;
+  });
+
+  it("constructor succeeds — no side effects until start()", () => {
+    const p = new BunPyroscope(BASE);
+    expect(p).toBeInstanceOf(BunPyroscope);
+  });
+
+  it("throws a clear error mentioning the runtime limitation", async () => {
+    const p = new BunPyroscope(BASE);
+    await expect(p.start()).rejects.toThrow(
+      "node:inspector/promises is not available in this runtime"
+    );
+  });
+
+  it("stop() is safe to call after start() fails", async () => {
+    const p = new BunPyroscope(BASE);
+    await expect(p.start()).rejects.toThrow();
+    await expect(p.stop()).resolves.toBeUndefined();
+  });
+
+  it("stop() is safe to call even if start() was never called", async () => {
+    const p = new BunPyroscope(BASE);
+    await expect(p.stop()).resolves.toBeUndefined();
+  });
+
+  it("profiler works normally after inspector is restored", async () => {
+    const p1 = new BunPyroscope(BASE);
+    await expect(p1.start()).rejects.toThrow();
+
+    _inspectorAvailable = true;
+    profiler = new BunPyroscope(BASE);
+    await profiler.start();
+    expect(_connectCalls).toBeGreaterThan(0);
   });
 });
 

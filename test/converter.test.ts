@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { calculateSampleRate, convertHeapToFolded, convertToFolded } from "../src/converter";
+import {
+  calculateSampleRate,
+  convertHeapToFolded,
+  convertToFolded,
+  convertToFoldedWallTime,
+} from "../src/converter";
 import type { CdpProfile, HeapProfileNode, SamplingHeapProfile } from "../src/types";
 
 /** Build a minimal CdpProfile from a flat node description. */
@@ -13,7 +18,8 @@ function makeProfile(
   }>,
   samples: number[],
   startTime = 0,
-  endTime = 1_000_000
+  endTime = 1_000_000,
+  timeDeltas?: number[]
 ): CdpProfile {
   return {
     nodes: nodes.map((n) => ({
@@ -30,9 +36,11 @@ function makeProfile(
     startTime,
     endTime,
     samples,
-    timeDeltas: samples.map(() =>
-      samples.length > 0 ? Math.floor((endTime - startTime) / samples.length) : 0
-    ),
+    timeDeltas:
+      timeDeltas ??
+      samples.map(() =>
+        samples.length > 0 ? Math.floor((endTime - startTime) / samples.length) : 0
+      ),
   };
 }
 
@@ -224,6 +232,199 @@ describe("convertToFolded", () => {
     );
     // Should produce empty output (no crash)
     expect(convertToFolded(profile)).toBe("");
+  });
+});
+
+describe("convertToFoldedWallTime", () => {
+  it("returns empty string for empty samples", () => {
+    const profile = makeProfile([{ id: 1, name: "(root)" }], []);
+    expect(convertToFoldedWallTime(profile)).toBe("");
+  });
+
+  it("returns empty string when samples array is missing", () => {
+    const profile = makeProfile([{ id: 1, name: "(root)" }], []);
+    // @ts-expect-error — testing runtime guard
+    profile.samples = undefined;
+    expect(convertToFoldedWallTime(profile)).toBe("");
+  });
+
+  it("returns empty string when timeDeltas is missing", () => {
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2] },
+        { id: 2, name: "myFunc" },
+      ],
+      [2, 2]
+    );
+    // @ts-expect-error — testing runtime guard
+    profile.timeDeltas = undefined;
+    expect(convertToFoldedWallTime(profile)).toBe("");
+  });
+
+  it("weights stacks by timeDeltas instead of counting samples", () => {
+    // Two samples hitting the same stack, but with different durations
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2] },
+        { id: 2, name: "myFunc" },
+      ],
+      [2, 2],
+      0,
+      1_000_000,
+      [100_000, 900_000] // 100ms + 900ms
+    );
+    expect(convertToFoldedWallTime(profile)).toBe("myFunc 1000000");
+  });
+
+  it("weights different stacks by their individual timeDeltas", () => {
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2, 3] },
+        { id: 2, name: "fast" },
+        { id: 3, name: "slow" },
+      ],
+      [2, 3, 3],
+      0,
+      1_000_000,
+      [10_000, 500_000, 490_000] // fast=10ms, slow=500ms+490ms
+    );
+    const result = convertToFoldedWallTime(profile);
+    const lines = result.split("\n");
+    expect(lines).toContain("fast 10000");
+    expect(lines).toContain("slow 990000");
+  });
+
+  it("keeps (idle) frames visible (unlike CPU converter)", () => {
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2, 3] },
+        { id: 2, name: "(idle)" },
+        { id: 3, name: "userCode" },
+      ],
+      [2, 3],
+      0,
+      1_000_000,
+      [800_000, 200_000]
+    );
+    const result = convertToFoldedWallTime(profile);
+    const lines = result.split("\n");
+    expect(lines).toContain("(idle) 800000");
+    expect(lines).toContain("userCode 200000");
+  });
+
+  it("still skips (root) and node:inspector frames", () => {
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2] },
+        { id: 2, name: "parent", children: [3] },
+        { id: 3, name: "inspector", url: "node:inspector", children: [4] },
+        { id: 4, name: "userFunc" },
+      ],
+      [4],
+      0,
+      1_000_000,
+      [500_000]
+    );
+    const result = convertToFoldedWallTime(profile);
+    expect(result).not.toContain("(root)");
+    expect(result).not.toContain("node:inspector");
+    expect(result).toContain("parent");
+    expect(result).toContain("userFunc");
+  });
+
+  it("skips samples with zero timeDelta", () => {
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2] },
+        { id: 2, name: "myFunc" },
+      ],
+      [2, 2, 2],
+      0,
+      1_000_000,
+      [0, 500_000, 500_000] // first sample has 0 delta (common for first sample)
+    );
+    expect(convertToFoldedWallTime(profile)).toBe("myFunc 1000000");
+  });
+
+  it("handles branching tree weighted by time", () => {
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2] },
+        { id: 2, name: "handler", children: [3, 4] },
+        { id: 3, name: "fetchAPI" },
+        { id: 4, name: "compute" },
+      ],
+      [3, 3, 4],
+      0,
+      1_000_000,
+      [400_000, 500_000, 100_000] // fetchAPI=900ms (I/O), compute=100ms (CPU)
+    );
+    const result = convertToFoldedWallTime(profile);
+    const lines = result.split("\n");
+    expect(lines).toContain("handler;fetchAPI 900000");
+    expect(lines).toContain("handler;compute 100000");
+  });
+
+  it("applies URL shortening same as CPU converter", () => {
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2] },
+        {
+          id: 2,
+          name: "myFunc",
+          url: "file:///home/user/my-project/src/deep/handler.ts",
+          line: 10,
+        },
+      ],
+      [2],
+      0,
+      1_000_000,
+      [500_000]
+    );
+    const result = convertToFoldedWallTime(profile);
+    expect(result).toContain("deep/handler.ts");
+    expect(result).not.toContain("/home/user/my-project");
+  });
+
+  it("handles node not found in nodeMap gracefully", () => {
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2] },
+        { id: 2, name: "knownFunc" },
+      ],
+      [99],
+      0,
+      1_000_000,
+      [500_000]
+    );
+    expect(convertToFoldedWallTime(profile)).toBe("");
+  });
+
+  it("shows idle vs active time ratio for I/O-heavy workloads", () => {
+    // Simulate a server that spends 70% waiting on I/O, 30% processing
+    // Samples hit leaf nodes: (idle) or processData
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2, 3] },
+        { id: 2, name: "(idle)" },
+        { id: 3, name: "handleRequest", children: [4] },
+        { id: 4, name: "processData" },
+      ],
+      [2, 2, 2, 2, 2, 2, 2, 4, 4, 4],
+      0,
+      10_000_000,
+      [
+        1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_000,
+        1_000_000, 1_000_000,
+      ]
+    );
+    const result = convertToFoldedWallTime(profile);
+    const lines = result.split("\n");
+    // 7 idle samples × 1_000_000 = 7_000_000
+    expect(lines).toContain("(idle) 7000000");
+    // 3 processData samples (leaf=4, stack=handleRequest;processData) × 1_000_000 = 3_000_000
+    expect(lines).toContain("handleRequest;processData 3000000");
+    expect(lines).toHaveLength(2);
   });
 });
 

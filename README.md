@@ -58,6 +58,42 @@ await profiler.stop(); // flushes final profile before disconnecting
 | `basicAuth` | `{ username, password }` | — | Basic auth credentials |
 | `maxRetries` | `number` | `2` | Push retry attempts before dropping window |
 | `debug` | `boolean` | `false` | Log debug info to stderr |
+| `wallTime` | `{ enabled: boolean }` | `{ enabled: false }` | Wall-time profiling (opt-in) |
+| `heap` | `{ enabled, samplingIntervalBytes? }` | `{ enabled: false }` | Heap allocation profiling (opt-in) |
+
+## Wall-time profiling
+
+CPU profiling only captures on-CPU time — what your code does when it's actively executing JavaScript. For I/O-heavy servers that spend most time waiting on external APIs, databases, or network calls, CPU profiles miss the full picture.
+
+Wall-time profiling weights stacks by elapsed wall-clock time (microseconds) and keeps `(idle)` frames visible, so you can see where wall-clock time actually goes — including I/O waits.
+
+```ts
+startProfiling({
+  pyroscopeUrl: "http://localhost:4040",
+  appName: "my-api-server",
+  wallTime: { enabled: true },
+});
+```
+
+When enabled, an additional `wall` profile stream is pushed alongside `cpu`. In Pyroscope/Grafana, select the `my-api-server.wall{}` stream to see the wall-time flamegraph.
+
+Wall-time profiling adds no extra sampling overhead — it reuses the same CDP profile data as CPU profiling, just weights it by `timeDeltas` (actual elapsed microseconds per sample) instead of counting samples.
+
+## Heap profiling
+
+Opt-in allocation profiling tracks where memory is being allocated:
+
+```ts
+startProfiling({
+  pyroscopeUrl: "http://localhost:4040",
+  appName: "my-service",
+  heap: { enabled: true, samplingIntervalBytes: 32_768 },
+});
+```
+
+When enabled, an `alloc_space` profile stream is pushed alongside `cpu`.
+
+**Bun limitation:** Bun's JavaScriptCore runtime does not currently implement `HeapProfiler.enable`. When heap profiling is enabled on Bun, the profiler logs a warning and continues with CPU-only profiling. Heap profiling works on Node.js/V8. This will be supported once Bun adds HeapProfiler to their inspector implementation.
 
 ## Auto-detected labels
 

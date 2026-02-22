@@ -1,3 +1,4 @@
+export { convertToFoldedWallTime } from "./converter.js";
 export { BunPyroscope } from "./profiler.js";
 export type {
   BunPyroscopeOptions,
