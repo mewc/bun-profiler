@@ -112,6 +112,14 @@ export interface BunPyroscopeOptions {
   debug?: boolean;
 
   /**
+   * Whether to gzip-compress the request body before pushing to Pyroscope.
+   * Disable for local development where bandwidth is cheap and to avoid
+   * potential issues with Bun's fetch handling of compressed request bodies.
+   * Default: true
+   */
+  compress?: boolean;
+
+  /**
    * Heap allocation sampling options (opt-in).
    */
   heap?: {
@@ -147,6 +155,7 @@ export interface ResolvedConfig {
   basicAuth: { username: string; password: string } | undefined;
   maxRetries: number;
   debug: boolean;
+  compress: boolean;
   heap: { enabled: boolean; samplingIntervalBytes: number };
   wallTime: { enabled: boolean };
 }

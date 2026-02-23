@@ -135,6 +135,16 @@ bun run build
 3. Immediately restarts profiling — no gap in coverage
 4. On SIGTERM/SIGINT: flushes the current window before exiting
 
+## Why not `Bun.jsc.profile()`?
+
+Bun exposes `bun:jsc` with a `profile()` function, but it's **not suitable** for continuous profiling:
+
+- **Wrong output format** — `Bun.jsc.profile()` returns a `SamplingProfile` with pre-formatted text strings (`.functions`, `.bytecodes`, `.stackTraces`), not structured CDP/V8 JSON with `nodes`/`samples`/`timeDeltas`. There's no way to convert this to folded stacks without writing a brittle text parser.
+- **No start/stop control** — `Bun.jsc.startSamplingProfiler()` has no corresponding stop function. It's a fire-and-forget debug tool that writes to a directory, not a programmatic API.
+- **`node:inspector` already works** — Bun added full `node:inspector` Profiler support in [v1.3.7](https://bun.sh/blog/bun-v1.3.7) (November 2024). This is the same CDP API that Chrome DevTools uses, returning proper `CdpProfile` objects that convert directly to Pyroscope's folded-stack format. That's why the minimum Bun version is 1.3.7.
+
+If you're on Bun < 1.3.7, you'll get a clear error from `start()` explaining the requirement. Upgrade Bun and it works out of the box.
+
 ## Graceful shutdown
 
 Signal handlers are installed automatically. On SIGTERM or SIGINT, the profiler flushes the current window and disconnects before re-emitting the signal so your process exits normally.

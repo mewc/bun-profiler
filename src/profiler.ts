@@ -17,6 +17,11 @@ import type {
 
 const gzipAsync = promisify(gzip);
 
+/** Convert a Buffer to a plain Uint8Array (no shared ArrayBuffer, no subclass). */
+function toUint8Array(buf: Buffer): Uint8Array {
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+}
+
 /**
  * BunPyroscope manages a continuous CPU profiling loop for Bun processes.
  *
@@ -60,6 +65,7 @@ export class BunPyroscope {
       basicAuth: options.basicAuth,
       maxRetries: options.maxRetries ?? 2,
       debug: options.debug ?? false,
+      compress: options.compress ?? true,
       heap: {
         enabled: options.heap?.enabled ?? false,
         samplingIntervalBytes: options.heap?.samplingIntervalBytes ?? 32_768,
@@ -193,16 +199,20 @@ export class BunPyroscope {
       return;
     }
 
+    // Capture windowStart locally so async catch handlers log the correct value
+    // (this.windowStart may be updated by beginWindow() before the push completes)
+    const windowStart = this.windowStart;
+
     const folded = convertToFolded(profile);
     if (!folded) {
-      this.log("debug", `Empty profile for window [${this.windowStart}-${windowEnd}], skipping`);
+      this.log("debug", `Empty profile for window [${windowStart}-${windowEnd}], skipping`);
     } else {
       const sampleRate = calculateSampleRate(profile);
       // Push is non-blocking so the profiling loop can start the next window immediately,
       // but we track the promise so stop() can await delivery before disconnecting.
       this.trackPush(
-        this.pushWithRetry(folded, this.windowStart, windowEnd, sampleRate).catch((err) => {
-          this.log("error", `All retries exhausted for [${this.windowStart}-${windowEnd}]: ${err}`);
+        this.pushWithRetry(folded, windowStart, windowEnd, sampleRate).catch((err) => {
+          this.log("error", `All retries exhausted for [${windowStart}-${windowEnd}]: ${err}`);
         })
       );
     }
@@ -212,26 +222,21 @@ export class BunPyroscope {
       if (!wallFolded) {
         this.log(
           "debug",
-          `Empty wall-time profile for window [${this.windowStart}-${windowEnd}], skipping`
+          `Empty wall-time profile for window [${windowStart}-${windowEnd}], skipping`
         );
       } else {
         this.trackPush(
-          this.pushWithRetry(wallFolded, this.windowStart, windowEnd, 1_000_000, "wall").catch(
-            (err) => {
-              this.log(
-                "error",
-                `Wall-time push failed for [${this.windowStart}-${windowEnd}]: ${err}`
-              );
-            }
-          )
+          this.pushWithRetry(wallFolded, windowStart, windowEnd, 1_000_000, "wall").catch((err) => {
+            this.log("error", `Wall-time push failed for [${windowStart}-${windowEnd}]: ${err}`);
+          })
         );
       }
     }
 
     if (this.config.heap.enabled) {
       this.trackPush(
-        this.flushHeapWindow(this.windowStart, windowEnd).catch((err) => {
-          this.log("error", `Heap flush failed for [${this.windowStart}-${windowEnd}]: ${err}`);
+        this.flushHeapWindow(windowStart, windowEnd).catch((err) => {
+          this.log("error", `Heap flush failed for [${windowStart}-${windowEnd}]: ${err}`);
         })
       );
     }
@@ -307,13 +312,22 @@ export class BunPyroscope {
   ): Promise<void> {
     const url = this.buildIngestUrl(from, until, sampleRate, type);
     const authHeader = this.buildAuthHeader();
-    const body = await gzipAsync(Buffer.from(folded, "utf8"));
 
+    let body: Uint8Array | string;
     const headers: Record<string, string> = {
       "Content-Type": "text/plain",
-      "Content-Encoding": "gzip",
-      "Content-Length": String(body.length),
     };
+
+    if (this.config.compress) {
+      const gzipped = await gzipAsync(Buffer.from(folded, "utf8"));
+      // Use Uint8Array instead of Buffer for reliable binary handling in Bun's fetch
+      body = toUint8Array(gzipped);
+      headers["Content-Encoding"] = "gzip";
+      headers["Content-Length"] = String(body.byteLength);
+    } else {
+      body = folded;
+    }
+
     if (authHeader) headers.Authorization = authHeader;
 
     let lastError: Error | null = null;
