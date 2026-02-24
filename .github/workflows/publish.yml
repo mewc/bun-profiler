@@ -20,8 +20,6 @@ jobs:
         with:
           bun-version: latest
 
-      # Do NOT set registry-url here — it creates an .npmrc with
-      # NODE_AUTH_TOKEN placeholder that overrides OIDC auto-detection.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -35,5 +33,11 @@ jobs:
       - name: Build
         run: bun run build
 
+      # Trusted publishing via OIDC — npm auto-detects the GitHub Actions
+      # OIDC environment and requests a short-lived token. No secrets needed.
+      # We set registry explicitly since setup-node's registry-url would
+      # create an .npmrc with a placeholder token that blocks OIDC.
       - name: Publish
-        run: npm publish --provenance --access public
+        run: |
+          npm config set registry https://registry.npmjs.org/
+          npm publish --provenance --access public
