@@ -1,28 +1,26 @@
 # Local Dev Environment
 
-Bun example app + Docker Compose infra for developing bun-profiler against a real observability stack.
+Full Docker Compose stack for developing bun-profiler against a real observability backend.
 
-The Bun app runs **natively on your machine** (where `node:inspector` works) while Pyroscope, Grafana, and Prometheus run in Docker.
+All services run in Docker — the Bun app container bind-mounts the repo source so `bun --hot` picks up changes instantly.
+
+> **Requires `oven/bun:1.3`+** in the container (`node:inspector` support on Linux landed in Bun 1.3).
 
 ## Quick Start
 
 ```bash
-# From repo root — starts infra + Bun dev server with hot-reload:
-bun run dev
-
-# Or start separately:
-bun run dev:infra        # Start Docker infra only
-bun --hot dev/app/server.ts  # Start Bun app separately
-
-# Tear down:
-bun run dev:down
+# From repo root:
+bun run dev          # Build & start all services (detached)
+bun run dev:logs     # Tail app logs
+bun run dev:restart  # Restart app (picks up source changes)
+bun run dev:down     # Stop everything
 ```
 
 ## Services
 
 | Service    | URL                      | Description                            |
 | ---------- | ------------------------ | -------------------------------------- |
-| App        | http://localhost:3002     | Bun server using bun-profiler (native) |
+| App        | http://localhost:3002     | Bun server using bun-profiler          |
 | Pyroscope  | http://localhost:4042     | Profile storage & UI                   |
 | Grafana    | http://localhost:3003     | Dashboards (anonymous admin, no login) |
 | Prometheus | http://localhost:9091     | Metrics (scrapes app)                  |
@@ -39,8 +37,4 @@ curl http://localhost:3002/cpu
 dev/loadgen.sh
 ```
 
-Then open Pyroscope or Grafana Explore and look for `bun-profiler-example`.
-
-## Why native Bun (not Docker)?
-
-`node:inspector` (which this library needs for CPU profiling) is only implemented in Bun on macOS. It's [not yet available on Linux](https://github.com/oven-sh/bun/issues/2445), so the app must run natively. Editing `src/` hot-reloads instantly via `bun --hot`.
+Then open Pyroscope (http://localhost:4042) or Grafana Explore (http://localhost:3003/explore) and look for `bun-profiler-example`.

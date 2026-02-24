@@ -3,7 +3,7 @@
 # Usage: dev/loadgen.sh [duration_seconds] [url]
 
 DURATION=${1:-30}
-URL=${2:-http://localhost:3000/cpu}
+URL=${2:-http://localhost:3002/cpu}
 
 echo "Hitting $URL for ${DURATION}s..."
 END=$((SECONDS + DURATION))

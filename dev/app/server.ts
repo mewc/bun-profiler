@@ -1,9 +1,7 @@
 import { BunPyroscope } from "../../src/index";
 
-const PYROSCOPE_URL = process.env.PYROSCOPE_URL ?? "http://localhost:4042";
-
 const profiler = new BunPyroscope({
-  pyroscopeUrl: PYROSCOPE_URL,
+  pyroscopeUrl: "http://pyroscope:4040",
   appName: "bun-profiler-example",
   pushIntervalMs: 5_000,
   debug: true,
@@ -12,7 +10,7 @@ const profiler = new BunPyroscope({
 });
 
 await profiler.start();
-console.log(`[dev] Profiler started, pushing every 5s to ${PYROSCOPE_URL}`);
+console.log("[dev] Profiler started, pushing every 5s to http://pyroscope:4040");
 
 function fib(n: number): number {
   if (n <= 1) return n;
@@ -20,7 +18,7 @@ function fib(n: number): number {
 }
 
 const server = Bun.serve({
-  port: Number(process.env.PORT ?? 3002),
+  port: 3000,
   routes: {
     "/": new Response(
       `<!DOCTYPE html>
