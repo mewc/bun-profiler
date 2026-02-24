@@ -439,7 +439,10 @@ export class BunPyroscope {
 
   private log(level: "debug" | "warn" | "error", msg: string): void {
     if (level === "debug" && !this.config.debug) return;
-    console.error(`[bun-pyroscope] [${level.toUpperCase()}] ${msg}`);
+    const formatted = `[bun-pyroscope] [${level.toUpperCase()}] ${msg}`;
+    if (level === "error") console.error(formatted);
+    else if (level === "warn") console.warn(formatted);
+    else console.log(formatted);
   }
 }
 

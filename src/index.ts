@@ -23,7 +23,7 @@ import type { BunPyroscopeOptions } from "./types.js";
 export function startProfiling(options: BunPyroscopeOptions): BunPyroscope {
   const profiler = new BunPyroscope(options);
   profiler.start().catch((err: unknown) => {
-    console.error("[bun-pyroscope] Failed to start profiling:", err);
+    console.warn("[bun-pyroscope] Failed to start profiling:", err);
   });
   return profiler;
 }
