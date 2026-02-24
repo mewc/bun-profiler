@@ -1,17 +1,4 @@
 services:
-  app:
-    build:
-      context: ..
-      dockerfile: dev/Dockerfile.app
-    ports:
-      - "3002:3000"
-    volumes:
-      - ..:/app
-      - /app/node_modules # anonymous volume so container's node_modules isn't overwritten
-    depends_on:
-      - pyroscope
-    restart: unless-stopped
-
   pyroscope:
     image: grafana/pyroscope:latest
     ports:
