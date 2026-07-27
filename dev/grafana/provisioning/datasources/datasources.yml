@@ -1,13 +1,16 @@
 apiVersion: 1
 
 datasources:
+  # Fixed UIDs so the provisioned dashboard can reference these datasources.
   - name: Pyroscope
+    uid: pyroscope
     type: grafana-pyroscope-datasource
     access: proxy
     url: http://pyroscope:4040
     isDefault: true
 
   - name: Prometheus
+    uid: prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090

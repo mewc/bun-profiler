@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: bun-profiler
+    type: file
+    allowUiUpdates: true
+    options:
+      # The whole provisioning tree is bind-mounted, so the dashboard JSON
+      # sitting next to this file is picked up without another mount.
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false
