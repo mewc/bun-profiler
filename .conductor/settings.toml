@@ -25,6 +25,12 @@ icon = "rocket"
 command = "dev/loadgen.sh 120"
 icon = "activity"
 
+[scripts.run.screenshots]
+# Drives the running stack with Playwright and regenerates the README images.
+# Fails if a dashboard panel is empty, so it doubles as an end-to-end check.
+command = "bun run screenshots"
+icon = "camera"
+
 [scripts.run.test]
 command = "bun test --watch"
 icon = "test-tube"
