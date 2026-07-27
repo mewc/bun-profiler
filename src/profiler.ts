@@ -17,9 +17,34 @@ import type {
 
 const gzipAsync = promisify(gzip);
 
-/** Convert a Buffer to a plain Uint8Array (no shared ArrayBuffer, no subclass). */
+/**
+ * View a Buffer as a plain Uint8Array — Bun's fetch handles this more reliably
+ * than a Buffer subclass. The view shares Buffer's pooled ArrayBuffer, which is
+ * fine because byteOffset/byteLength scope it to exactly this buffer's bytes.
+ */
 function toUint8Array(buf: Buffer): Uint8Array {
   return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+}
+
+/**
+ * A non-2xx response from the Pyroscope ingest endpoint.
+ *
+ * Carries the status so retry decisions are made on a typed field rather than
+ * by sniffing the message string.
+ */
+class PushError extends Error {
+  readonly status: number;
+
+  constructor(status: number, body: string) {
+    super(`HTTP ${status}: ${body}`);
+    this.name = "PushError";
+    this.status = status;
+  }
+
+  /** 5xx is transient; 429/408 are explicitly retryable. Other 4xx are not. */
+  get retryable(): boolean {
+    return this.status >= 500 || this.status === 429 || this.status === 408;
+  }
 }
 
 /**
@@ -48,8 +73,15 @@ export class BunPyroscope {
   private pushTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private windowStart = 0;
-  private signalHandlersInstalled = false;
   private inFlightPushes = new Set<Promise<void>>();
+  /**
+   * The flush/restart cycle currently executing in the timer callback.
+   * clearTimeout cannot cancel a callback that has already fired, so stop()
+   * and tag() await this to avoid issuing a second concurrent Profiler.stop.
+   */
+  private activeCycle: Promise<void> | null = null;
+  /** Kept so stop() can remove them — otherwise every instance leaks two listeners. */
+  private signalHandlers: { sigterm: () => void; sigint: () => void } | null = null;
 
   constructor(options: BunPyroscopeOptions) {
     const appName = resolveAppName(options.appName);
@@ -65,7 +97,9 @@ export class BunPyroscope {
       basicAuth: options.basicAuth,
       maxRetries: options.maxRetries ?? 2,
       debug: options.debug ?? false,
-      compress: options.compress ?? true,
+      // Defaults to false: Pyroscope's /ingest silently discards gzipped
+      // folded bodies (HTTP 200, empty profile stored). See BunPyroscopeOptions.
+      compress: options.compress ?? false,
       heap: {
         enabled: options.heap?.enabled ?? false,
         samplingIntervalBytes: options.heap?.samplingIntervalBytes ?? 32_768,
@@ -93,7 +127,7 @@ export class BunPyroscope {
     } catch {
       this.session = null;
       throw new Error(
-        "[bun-pyroscope] node:inspector/promises is not available in this runtime. " +
+        "[bun-profiler] node:inspector/promises is not available in this runtime. " +
           "CPU profiling requires Node.js or a Bun version with inspector support."
       );
     }
@@ -106,7 +140,7 @@ export class BunPyroscope {
     } catch (err) {
       this.session.disconnect();
       this.session = null;
-      throw new Error(`[bun-pyroscope] Failed to initialize profiler session: ${err}`);
+      throw new Error(`[bun-profiler] Failed to initialize profiler session: ${err}`);
     }
 
     if (this.config.heap.enabled) {
@@ -138,11 +172,23 @@ export class BunPyroscope {
       this.pushTimer = null;
     }
 
+    // A timer callback that already fired can't be cancelled. Let it finish so
+    // we don't issue a second concurrent Profiler.stop, and so the window it is
+    // pushing is registered before we snapshot the in-flight set below.
+    await this.activeCycle?.catch(() => undefined);
+
     await this.endWindowAndPush().catch((err) => {
       this.log("warn", `Final flush failed: ${err}`);
     });
 
-    await Promise.allSettled([...this.inFlightPushes]);
+    // Pushes registered while awaiting can add more entries, so drain until
+    // empty rather than awaiting a single snapshot — otherwise the final
+    // window is dropped on the floor, which is the whole point of stop().
+    while (this.inFlightPushes.size > 0) {
+      await Promise.allSettled([...this.inFlightPushes]);
+    }
+
+    this.removeSignalHandlers();
 
     if (this.session) {
       if (this.config.heap.enabled) {
@@ -179,9 +225,34 @@ export class BunPyroscope {
 
   private scheduleNextWindow(): void {
     if (!this.running) return;
-    this.pushTimer = setTimeout(async () => {
-      await this.endWindowAndPush();
-      if (this.running) await this.beginWindow();
+    this.pushTimer = setTimeout(() => {
+      // Mark the timer as spent — it has fired and can no longer be cleared.
+      this.pushTimer = null;
+
+      // This promise deliberately never rejects. Any escaping error would
+      // leave the profiler stopped with no window ever scheduled again, and
+      // would surface only as an unhandled rejection.
+      const cycle = (async () => {
+        try {
+          await this.endWindowAndPush();
+        } catch (err) {
+          // e.g. converting a malformed profile.
+          this.log("error", `Push cycle failed: ${err}`);
+        }
+
+        if (!this.running) return;
+
+        try {
+          await this.beginWindow();
+        } catch (err) {
+          this.log("error", `Failed to restart profiling window: ${err}`);
+        }
+      })();
+
+      this.activeCycle = cycle;
+      void cycle.then(() => {
+        if (this.activeCycle === cycle) this.activeCycle = null;
+      });
     }, this.config.pushIntervalMs);
   }
 
@@ -218,7 +289,7 @@ export class BunPyroscope {
     }
 
     if (this.config.wallTime.enabled) {
-      const wallFolded = convertToFoldedWallTime(profile);
+      const wallFolded = convertToFoldedWallTime(profile, this.config.sampleIntervalUs);
       if (!wallFolded) {
         this.log(
           "debug",
@@ -323,7 +394,9 @@ export class BunPyroscope {
       // Use Uint8Array instead of Buffer for reliable binary handling in Bun's fetch
       body = toUint8Array(gzipped);
       headers["Content-Encoding"] = "gzip";
-      headers["Content-Length"] = String(body.byteLength);
+      // Content-Length is deliberately not set — it's a forbidden request
+      // header, so fetch derives it from the body. Setting it risks a
+      // duplicate/conflicting header that strict proxies answer with a 400.
     } else {
       body = folded;
     }
@@ -343,21 +416,28 @@ export class BunPyroscope {
         const response = await fetch(url, { method: "POST", headers, body });
 
         if (response.ok) {
+          // Drain the body so the connection can be reused rather than held
+          // open — this runs thousands of times over a process's lifetime.
+          await response.arrayBuffer().catch(() => undefined);
           const lines = folded.split("\n").length;
           this.log("debug", `Pushed ${lines} stacks [${from}-${until}] HTTP ${response.status}`);
           return;
         }
 
         const text = await response.text().catch(() => "(unreadable)");
-        const err = new Error(`HTTP ${response.status}: ${text}`);
+        const err = new PushError(response.status, text);
 
-        // 4xx = client error, retrying won't help
-        if (response.status >= 400 && response.status < 500) throw err;
+        // Most 4xx are client errors that retrying won't fix, but 429 (ingest
+        // rate limit — Grafana Cloud returns this) and 408 are explicitly
+        // retryable. Treating them as fatal drops every window for the whole
+        // duration of a rate limit.
+        if (!err.retryable) throw err;
 
         lastError = err;
         this.log("warn", `Push failed (attempt ${attempt + 1}): ${err.message}`);
       } catch (fetchErr) {
-        if (fetchErr instanceof Error && fetchErr.message.startsWith("HTTP 4")) throw fetchErr;
+        // Non-retryable HTTP status — propagate rather than burning retries.
+        if (fetchErr instanceof PushError && !fetchErr.retryable) throw fetchErr;
         lastError = fetchErr instanceof Error ? fetchErr : new Error(String(fetchErr));
         this.log("warn", `Push error (attempt ${attempt + 1}): ${lastError.message}`);
       }
@@ -397,14 +477,22 @@ export class BunPyroscope {
     try {
       return (await fn()) as Awaited<T>;
     } finally {
-      // 5. Cancel any timer that fired during fn()
+      // 5. Cancel any timer that fired during fn(), and let an already-running
+      //    cycle finish so it can't interleave with the flush below.
       if (this.pushTimer !== null) {
         clearTimeout(this.pushTimer);
         this.pushTimer = null;
       }
+      await this.activeCycle?.catch(() => undefined);
 
-      // 6. Flush tagged window
-      await this.endWindowAndPush();
+      // 6. Flush the tagged window. If this throws, the labels must still be
+      //    restored — otherwise every later window is misattributed to this
+      //    tag and profiling never resumes.
+      try {
+        await this.endWindowAndPush();
+      } catch (err) {
+        this.log("error", `Tagged window flush failed: ${err}`);
+      }
 
       // 7. Restore labels + resume normal profiling
       this.config.labels = savedLabels;
@@ -417,13 +505,11 @@ export class BunPyroscope {
    * After flush, re-emits the signal so the process exits normally.
    */
   private installSignalHandlers(): void {
-    if (this.signalHandlersInstalled) return;
-    this.signalHandlersInstalled = true;
+    if (this.signalHandlers) return;
 
     const shutdown = async (signal: NodeJS.Signals) => {
       this.log("debug", `Received ${signal}, flushing final profile...`);
-      process.removeListener("SIGTERM", sigtermHandler);
-      process.removeListener("SIGINT", sigintHandler);
+      // stop() removes the handlers, so the re-raise below doesn't re-enter.
       await this.stop().catch((err) => {
         this.log("error", `Error during ${signal} shutdown: ${err}`);
       });
@@ -433,13 +519,29 @@ export class BunPyroscope {
     const sigtermHandler = () => void shutdown("SIGTERM");
     const sigintHandler = () => void shutdown("SIGINT");
 
+    this.signalHandlers = { sigterm: sigtermHandler, sigint: sigintHandler };
+
     process.on("SIGTERM", sigtermHandler);
     process.on("SIGINT", sigintHandler);
   }
 
+  /**
+   * Detach the shutdown handlers.
+   *
+   * Without this, every start()/stop() pair leaks two process listeners —
+   * enough instances triggers MaxListenersExceededWarning and makes each stale
+   * handler re-raise the signal on shutdown.
+   */
+  private removeSignalHandlers(): void {
+    if (!this.signalHandlers) return;
+    process.removeListener("SIGTERM", this.signalHandlers.sigterm);
+    process.removeListener("SIGINT", this.signalHandlers.sigint);
+    this.signalHandlers = null;
+  }
+
   private log(level: "debug" | "warn" | "error", msg: string): void {
     if (level === "debug" && !this.config.debug) return;
-    const formatted = `[bun-pyroscope] [${level.toUpperCase()}] ${msg}`;
+    const formatted = `[bun-profiler] [${level.toUpperCase()}] ${msg}`;
     if (level === "error") console.error(formatted);
     else if (level === "warn") console.warn(formatted);
     else console.log(formatted);

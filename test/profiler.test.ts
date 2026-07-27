@@ -611,4 +611,128 @@ describe("push failure handling", () => {
     // Restore mock
     (globalThis as unknown as { fetch: unknown }).fetch = _fetchMock;
   });
+
+  it("retries a 429 — an ingest rate limit is transient, not fatal", async () => {
+    let attempts = 0;
+    (globalThis as unknown as { fetch: unknown }).fetch = mock(() => {
+      attempts++;
+      return Promise.resolve(new Response("rate limited", { status: 429 }));
+    });
+
+    profiler = new BunPyroscope({ ...BASE, maxRetries: 1 });
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    // 1 initial attempt + 1 retry. Treating 429 as fatal would give exactly 1.
+    expect(attempts).toBe(2);
+
+    (globalThis as unknown as { fetch: unknown }).fetch = _fetchMock;
+  });
+
+  it("does not retry a 400 — a malformed request will never succeed", async () => {
+    let attempts = 0;
+    (globalThis as unknown as { fetch: unknown }).fetch = mock(() => {
+      attempts++;
+      return Promise.resolve(new Response("bad request", { status: 400 }));
+    });
+
+    profiler = new BunPyroscope({ ...BASE, maxRetries: 3 });
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    expect(attempts).toBe(1);
+
+    (globalThis as unknown as { fetch: unknown }).fetch = _fetchMock;
+  });
+
+  it("sends an uncompressed body by default", async () => {
+    // Pyroscope's /ingest silently discards gzipped folded bodies: it answers
+    // HTTP 200 and stores an empty profile, so a compressed default means the
+    // profiler appears healthy while delivering nothing.
+    let seenHeaders: Record<string, string> = {};
+    let seenBody: unknown;
+    (globalThis as unknown as { fetch: unknown }).fetch = mock(
+      (_url: string, init: { headers: Record<string, string>; body: unknown }) => {
+        seenHeaders = init.headers;
+        seenBody = init.body;
+        return Promise.resolve(new Response("ok", { status: 200 }));
+      }
+    );
+
+    profiler = new BunPyroscope(BASE);
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    expect(Object.keys(seenHeaders)).not.toContain("Content-Encoding");
+    expect(typeof seenBody).toBe("string");
+
+    (globalThis as unknown as { fetch: unknown }).fetch = _fetchMock;
+  });
+
+  it("does not set Content-Length — fetch derives it from the body", async () => {
+    let seenHeaders: Record<string, string> = {};
+    (globalThis as unknown as { fetch: unknown }).fetch = mock(
+      (_url: string, init: { headers: Record<string, string> }) => {
+        seenHeaders = init.headers;
+        return Promise.resolve(new Response("ok", { status: 200 }));
+      }
+    );
+
+    profiler = new BunPyroscope({ ...BASE, compress: true });
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    expect(seenHeaders["Content-Encoding"]).toBe("gzip");
+    expect(Object.keys(seenHeaders)).not.toContain("Content-Length");
+
+    (globalThis as unknown as { fetch: unknown }).fetch = _fetchMock;
+  });
+});
+
+describe("shutdown handlers", () => {
+  function signalListenerCount() {
+    return process.listenerCount("SIGTERM") + process.listenerCount("SIGINT");
+  }
+
+  it("removes its SIGTERM/SIGINT listeners on stop()", async () => {
+    const before = signalListenerCount();
+
+    const p = new BunPyroscope(BASE);
+    await p.start();
+    expect(signalListenerCount()).toBe(before + 2);
+
+    await p.stop();
+    expect(signalListenerCount()).toBe(before);
+  });
+
+  it("does not accumulate listeners across repeated start/stop cycles", async () => {
+    const before = signalListenerCount();
+
+    for (let i = 0; i < 5; i++) {
+      const p = new BunPyroscope(BASE);
+      await p.start();
+      await p.stop();
+    }
+
+    expect(signalListenerCount()).toBe(before);
+  });
+
+  it("reinstalls handlers when the same instance is restarted", async () => {
+    const before = signalListenerCount();
+
+    const p = new BunPyroscope(BASE);
+    await p.start();
+    await p.stop();
+    await p.start();
+
+    // Without reinstalling, a later SIGTERM would skip the final flush.
+    expect(signalListenerCount()).toBe(before + 2);
+
+    await p.stop();
+    expect(signalListenerCount()).toBe(before);
+  });
 });

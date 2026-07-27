@@ -44,6 +44,4 @@ while (Date.now() - start < 12_000) {
 
 console.log("Work done. Stopping profiler (final flush)...");
 await profiler.stop();
-console.log(
-  `\nDone! Open http://localhost:4040 in your browser and look for "bun-profiler-smoke-test"`
-);
+console.log(`\nDone! Open ${pyroscopeUrl} and look for "bun-profiler-smoke-test"`);

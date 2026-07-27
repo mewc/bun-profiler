@@ -180,6 +180,20 @@ describe("encodePyroscopeName", () => {
     expect(result).toContain("key_with_spaces=value");
   });
 
+  it("sanitizes the app name, which shares the param with the labels", () => {
+    // A SERVICE_NAME with a space or brace would otherwise emit a structurally
+    // invalid key that Pyroscope rejects with a 4xx.
+    expect(encodePyroscopeName("my app{x}", {})).toBe("my_app_x_.cpu");
+    expect(encodePyroscopeName("my app", { env: "prod" })).toBe("my_app.cpu{env=prod}");
+  });
+
+  it("keeps a scoped package name usable as an app name", () => {
+    // npm_package_name is a default source for appName, and scoped names are
+    // the norm — "@acme/api" must not corrupt the stream key.
+    const result = encodePyroscopeName("@acme/api", { env: "prod" });
+    expect(result).toBe("@acme/api.cpu{env=prod}");
+  });
+
   it("sanitizes value special chars to underscores", () => {
     const result = encodePyroscopeName("myapp", { key: "val=with=equals" });
     expect(result).toContain("key=val_with_equals");

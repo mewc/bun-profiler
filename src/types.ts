@@ -113,9 +113,14 @@ export interface BunPyroscopeOptions {
 
   /**
    * Whether to gzip-compress the request body before pushing to Pyroscope.
-   * Disable for local development where bandwidth is cheap and to avoid
-   * potential issues with Bun's fetch handling of compressed request bodies.
-   * Default: true
+   *
+   * Default: false.
+   *
+   * Leave this off unless you have confirmed your server accepts it. Grafana
+   * Pyroscope's `/ingest` endpoint does not decompress `format=folded` bodies:
+   * verified against `grafana/pyroscope:latest`, a gzipped body is answered
+   * with HTTP 200 and then stored as an empty profile. The failure is
+   * invisible — pushes look successful and no data ever appears.
    */
   compress?: boolean;
 

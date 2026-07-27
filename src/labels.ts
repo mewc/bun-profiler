@@ -72,8 +72,15 @@ export function encodePyroscopeName(
   labels: Record<string, string>,
   type = "cpu"
 ): string {
+  // The app name shares the `name` param with the labels, so it needs the same
+  // escaping. A scoped package name ("@acme/api" — the npm_package_name
+  // default) or any SERVICE_NAME containing a brace, comma or space would
+  // otherwise emit a structurally invalid key that Pyroscope rejects with a
+  // 4xx, silently dropping every push for the life of the process.
+  const safeAppName = appName.replace(/[{}=,\s]/g, "_");
+
   const entries = Object.entries(labels);
-  if (entries.length === 0) return `${appName}.${type}`;
+  if (entries.length === 0) return `${safeAppName}.${type}`;
 
   entries.sort(([a], [b]) => a.localeCompare(b));
   const labelStr = entries
@@ -84,5 +91,5 @@ export function encodePyroscopeName(
     })
     .join(",");
 
-  return `${appName}.${type}{${labelStr}}`;
+  return `${safeAppName}.${type}{${labelStr}}`;
 }
