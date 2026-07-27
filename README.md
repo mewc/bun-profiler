@@ -171,7 +171,7 @@ It waits until the stack is serving and prints the URLs — by default
 <http://localhost:3003/d/bun-profiler-demo>. (Ports are per-workspace under
 [Conductor](https://conductor.build), so take them from the output.)
 
-The demo server exposes workloads with deliberately distinct flamegraph shapes — deep recursion, a hot comparator, regex scanning, crypto — alongside I/O-bound ones and a realistic mixed `/api/checkout` pipeline. Drive them from the panel the script links to (<http://localhost:3002> by default):
+The demo server exposes workloads with deliberately distinct flamegraph shapes — deep recursion, a hot comparator, regex scanning, crypto — alongside I/O-bound ones and a realistic mixed `/api/checkout` pipeline. Drive them from the panel the script links to (<http://localhost:3002> by default), individually, by group, or all at once. Every result links straight to the flamegraph for that exact run:
 
 ![Demo control panel](./docs/images/demo-panel.png)
 
@@ -184,6 +184,8 @@ The CPU profile contains no idle time at all — every frame is real compute, an
 ![Wall profile with idle as the top entry](./docs/images/wall-flamegraph.png)
 
 That contrast is the whole argument for wall-time profiling: the CPU flamegraph tells you which loop to optimise, while the wall flamegraph tells you whether optimising it would matter at all.
+
+Those three images are not hand-captured. `bun run screenshots` drives the live stack with Playwright — clicks "Run all", waits for the profiler to push, generates 90s of mixed traffic, blocks until Prometheus actually returns series, then captures Grafana. It fails if any panel renders "No data" or a result is missing its deep link, so regenerating them is itself an end-to-end test.
 
 See [`dev/README.md`](./dev/README.md) for the full workload list and troubleshooting.
 

@@ -18,15 +18,32 @@ bun run dev:demo   # start everything, then drive 60s of traffic
 `dev/up.sh` waits until the app is actually serving and then prints the URLs it
 published — don't hardcode them, see [Ports](#ports) below.
 
-| Command               | What it does                                      |
-| --------------------- | ------------------------------------------------- |
-| `bun run dev`         | Build and start all services, wait until healthy   |
-| `bun run dev:demo`    | Same, then generate traffic so nothing is empty    |
-| `bun run dev:load`    | Drive mixed traffic (`dev/loadgen.sh [seconds]`)   |
-| `bun run dev:logs`    | Tail app logs (profiler pushes are logged)         |
-| `bun run dev:restart` | Restart just the app                               |
-| `bun run dev:reset`   | Wipe all profile data and rebuild from scratch     |
-| `bun run dev:down`    | Stop this workspace's stack and delete its volumes |
+| Command               | What it does                                       |
+| --------------------- | -------------------------------------------------- |
+| `bun run dev`         | Build and start all services, wait until healthy    |
+| `bun run dev:demo`    | Same, then generate traffic so nothing is empty     |
+| `bun run dev:load`    | Drive mixed traffic (`dev/loadgen.sh [seconds]`)    |
+| `bun run dev:logs`    | Tail app logs (profiler pushes are logged)          |
+| `bun run dev:restart` | Restart just the app                                |
+| `bun run dev:reset`   | Wipe all profile data and rebuild from scratch      |
+| `bun run dev:down`    | Stop this workspace's stack and delete its volumes  |
+| `bun run screenshots` | Regenerate the README images from the running stack |
+
+## The control panel
+
+<http://localhost:3002> (or your workspace's port) lists every workload:
+
+- **Run** on a card runs that one workload.
+- **Run all N** next to a group heading runs just that group, in sequence.
+- **Run all 10 workloads** runs everything.
+
+Each result shows the elapsed time and a **View this run in Grafana →** link
+pointing at the dashboard with the time range set to that run's window (padded,
+since profiles are pushed on an interval). That's the quickest way to see a
+single request's flamegraph rather than hunting for it in a 15-minute window.
+
+Groups run sequentially on purpose — overlapping workloads interleave in the
+flamegraph and stop being separable.
 
 ## Services
 
@@ -122,9 +139,33 @@ root — that path is read immediately and is gitignored.
 You have an older Grafana container whose database predates the datasource UIDs.
 `bun run dev:reset` clears it.
 
-**Ports already allocated.** Another stack is using them — most likely an older
-`dev`-named project from before the per-workspace naming. Check with
-`docker compose -p dev ps` and remove it with `docker compose -p dev down -v`.
+**Ports already allocated.** `dev/up.sh` handles the common case itself: if a
+`bun-profiler-*` stack is sitting on this workspace's port block, it is by
+definition an orphan of ours (the block belongs to exactly one workspace), so the
+script retires it and continues. If something unrelated holds the port it stops
+and says so rather than killing your container — free the port, or pin your own:
+
+```bash
+APP_PORT=4102 GRAFANA_PORT=4103 PYROSCOPE_PORT=4104 PROMETHEUS_PORT=4105 dev/up.sh
+```
+
+`dev/down.sh --all` removes every `bun-profiler-*` stack on the machine.
+
+**Renaming a Conductor workspace.** Conductor renames a workspace to follow its
+branch but leaves the worktree directory alone, so the project name is derived
+from the directory. Deriving it from `CONDUCTOR_WORKSPACE_NAME` meant a rename
+produced a *second* project competing for the same port block as the stack
+already running, which failed with "port is already allocated" and stranded the
+original containers under a name nothing referenced any more.
+
+## Screenshots
+
+`bun run screenshots` drives the running stack with Playwright — it clicks
+"Run all", waits for the profiler to push, drives 90s of mixed traffic, waits
+until Prometheus actually returns series, and only then captures Grafana. It
+fails loudly if a panel renders "No data" or if any result is missing its Grafana
+link, so a green run is evidence the demo works end to end rather than a picture
+of a hopeful moment.
 
 **`all predefined address pools have been fully subnetted`.** Docker has run out
 of network address space, usually from many stopped Compose projects. Reclaim it

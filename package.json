@@ -60,6 +60,7 @@
     "dev:restart": "dev/compose.sh restart app",
     "dev:load": "dev/loadgen.sh",
     "dev:reset": "dev/down.sh && dev/up.sh",
+    "screenshots": "dev/screenshots.sh",
     "smoke": "bun smoke-test.ts",
     "release:patch": "npm version patch && git push --follow-tags",
     "release:minor": "npm version minor && git push --follow-tags",
@@ -69,6 +70,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.4.2",
     "@types/node": "^25.3.0",
+    "playwright": "^1.62.0",
     "typescript": "^5.9.3"
   },
   "engines": {

@@ -54,10 +54,14 @@ function renderCard(w: Workload): string {
 
 function renderGroup(kind: Workload["kind"]): string {
   const meta = KIND_META[kind];
-  const cards = WORKLOADS.filter((w) => w.kind === kind).map(renderCard).join("");
+  const group = WORKLOADS.filter((w) => w.kind === kind);
+  const cards = group.map(renderCard).join("");
   return `
-    <section>
-      <h2><span class="dot" style="--pill:${meta.color}"></span>${meta.label}</h2>
+    <section data-group="${kind}">
+      <h2>
+        <span class="dot" style="--pill:${meta.color}"></span>${meta.label}
+        <button class="ghost" data-run-group="${kind}">Run all ${group.length}</button>
+      </h2>
       <p class="note">${meta.note}</p>
       <div class="grid">${cards}</div>
     </section>`;
@@ -136,7 +140,7 @@ export function renderPanel(appName: string, pyroscopeUrl: string, links: PanelL
     display: none; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px;
     background: #0b0d12; border: 1px solid #222836; border-radius: 8px;
     padding: 9px 11px; color: #7ee2a8; white-space: pre-wrap; word-break: break-all;
-    max-height: 108px; overflow: auto;
+    max-height: 150px; overflow: auto;
   }
   output.show { display: block; }
   output.err { color: #fca5a5; }
@@ -144,6 +148,26 @@ export function renderPanel(appName: string, pyroscopeUrl: string, links: PanelL
   .bar button { background: #7c3aed; padding: 9px 17px; }
   .bar button:hover { background: #6d28d9; }
   .bar span { color: #7c8697; font-size: 13.5px; }
+  .cta {
+    display: inline-flex; align-items: center; padding: 9px 15px; border-radius: 8px;
+    background: #161a23; border: 1px solid #262c39; color: #e6e8ee;
+    text-decoration: none; font-size: 13.5px; font-weight: 600;
+  }
+  .cta:hover { border-color: #7c3aed; background: #1b2029; }
+  .cta.pulse { border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.25); }
+  h2 button.ghost {
+    background: transparent; border: 1px solid #2b3242; color: #9aa3b2;
+    font-size: 11.5px; font-weight: 600; padding: 3px 10px; border-radius: 999px;
+    margin-left: 4px;
+  }
+  h2 button.ghost:hover { border-color: #4b5569; color: #e6e8ee; background: #161a23; }
+  h2 button.ghost:disabled { opacity: 0.6; }
+  output .ms { color: #e6e8ee; font-weight: 600; }
+  output .viz {
+    display: block; margin-top: 7px; color: #a78bfa;
+    font-family: inherit; font-size: 12.5px; text-decoration: none; font-weight: 600;
+  }
+  output .viz:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -159,8 +183,9 @@ export function renderPanel(appName: string, pyroscopeUrl: string, links: PanelL
   </div>
 
   <div class="bar">
-    <button id="all">Run every workload once</button>
-    <span>…then open Pyroscope and compare the <code>.cpu</code> and <code>.wall</code> streams.</span>
+    <button id="all">Run all ${WORKLOADS.length} workloads</button>
+    <a class="cta" id="all-grafana" href="${links.grafana}/d/bun-profiler-demo" target="_blank">Open Grafana dashboard &rarr;</a>
+    <span>Each result links to the flamegraph for that exact run.</span>
   </div>
 
   ${renderGroup("mixed")}
@@ -169,19 +194,47 @@ export function renderPanel(appName: string, pyroscopeUrl: string, links: PanelL
 </main>
 
 <script>
+const GRAFANA = ${JSON.stringify(links.grafana)};
+const SERVICE = ${JSON.stringify(appName)};
+
+// Profiles are pushed on an interval, so a window covering only the request
+// itself would usually be empty. Pad generously on both sides.
+const LEAD_MS = 15000;
+const TRAIL_MS = 20000;
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+}
+
+/** Dashboard link scoped to the window a single run occupied. */
+function grafanaLink(startedAt, endedAt) {
+  const params = new URLSearchParams({
+    from: String(startedAt - LEAD_MS),
+    to: String(endedAt + TRAIL_MS),
+    'var-service': SERVICE,
+  });
+  return GRAFANA + '/d/bun-profiler-demo?' + params.toString();
+}
+
 async function run(button) {
   const card = button.closest('.card');
   const out = card.querySelector('output');
   button.disabled = true;
   out.className = 'show';
   out.textContent = 'running…';
-  const t0 = performance.now();
+
+  const startedAt = Date.now();
   try {
     const res = await fetch(button.dataset.path);
     const body = await res.text();
-    const ms = (performance.now() - t0).toFixed(0);
+    const endedAt = Date.now();
+
     out.className = res.ok ? 'show' : 'show err';
-    out.textContent = ms + 'ms  ' + body.slice(0, 300);
+    out.innerHTML =
+      '<span class="ms">' + (endedAt - startedAt) + 'ms</span> ' +
+      escapeHtml(body.slice(0, 260)) +
+      '<a class="viz" href="' + grafanaLink(startedAt, endedAt) + '" target="_blank">' +
+      'View this run in Grafana &rarr;</a>';
   } catch (err) {
     out.className = 'show err';
     out.textContent = String(err);
@@ -190,16 +243,39 @@ async function run(button) {
   }
 }
 
+/** Run a set of cards in sequence so their profiles don't overlap. */
+async function runAll(buttons, trigger) {
+  const startedAt = Date.now();
+  trigger.disabled = true;
+  const label = trigger.textContent;
+  let done = 0;
+  for (const b of buttons) {
+    done++;
+    trigger.textContent = 'Running ' + done + '/' + buttons.length + '…';
+    await run(b);
+  }
+  trigger.textContent = label;
+  trigger.disabled = false;
+
+  const bar = document.getElementById('all-grafana');
+  bar.href = grafanaLink(startedAt, Date.now());
+  bar.classList.add('pulse');
+  setTimeout(() => bar.classList.remove('pulse'), 2000);
+}
+
 for (const b of document.querySelectorAll('.card button')) {
   b.addEventListener('click', () => run(b));
 }
 
-document.getElementById('all').addEventListener('click', async (e) => {
-  e.target.disabled = true;
-  for (const b of document.querySelectorAll('.card button')) {
-    await run(b);
-  }
-  e.target.disabled = false;
+for (const groupButton of document.querySelectorAll('[data-run-group]')) {
+  groupButton.addEventListener('click', () => {
+    const section = groupButton.closest('section');
+    runAll([...section.querySelectorAll('.card button')], groupButton);
+  });
+}
+
+document.getElementById('all').addEventListener('click', (e) => {
+  runAll([...document.querySelectorAll('.card button')], e.target);
 });
 </script>
 </body>
