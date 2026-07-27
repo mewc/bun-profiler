@@ -693,6 +693,102 @@ describe("push failure handling", () => {
   });
 });
 
+describe("ingest window bounds", () => {
+  it("never pushes a zero-length range, even for a sub-second window", async () => {
+    const urls: string[] = [];
+    (globalThis as unknown as { fetch: unknown }).fetch = mock((url: string) => {
+      urls.push(url);
+      return Promise.resolve(new Response("ok", { status: 200 }));
+    });
+
+    // tag() closes its window the moment the callback returns, so this is the
+    // realistic way to produce from === until.
+    profiler = new BunPyroscope(BASE);
+    await profiler.start();
+    await profiler.tag({ job: "quick" }, () => 1 + 1);
+    await profiler.stop();
+    profiler = null;
+
+    expect(urls.length).toBeGreaterThan(0);
+    for (const url of urls) {
+      const params = new URL(url).searchParams;
+      const from = Number(params.get("from"));
+      const until = Number(params.get("until"));
+      expect(until).toBeGreaterThan(from);
+    }
+
+    (globalThis as unknown as { fetch: unknown }).fetch = _fetchMock;
+  });
+});
+
+describe("stats()", () => {
+  it("reports nothing delivered before start()", () => {
+    const p = new BunPyroscope(BASE);
+    expect(p.stats()).toMatchObject({
+      running: false,
+      pushedWindows: 0,
+      failedWindows: 0,
+      lastPushAt: null,
+      lastError: null,
+    });
+  });
+
+  it("counts a delivered window and timestamps it", async () => {
+    const before = Date.now();
+    profiler = new BunPyroscope(BASE);
+    await profiler.start();
+    await profiler.stop();
+
+    const s = profiler.stats();
+    profiler = null;
+
+    expect(s.pushedWindows).toBeGreaterThan(0);
+    expect(s.failedWindows).toBe(0);
+    expect(s.lastError).toBeNull();
+    expect(s.lastPushAt).toBeGreaterThanOrEqual(before);
+  });
+
+  it("records the failure instead of reporting a clean profiler", async () => {
+    (globalThis as unknown as { fetch: unknown }).fetch = mock(() =>
+      Promise.resolve(new Response("nope", { status: 400 }))
+    );
+
+    profiler = new BunPyroscope({ ...BASE, maxRetries: 0 });
+    await profiler.start();
+    await profiler.stop();
+
+    const s = profiler.stats();
+    profiler = null;
+
+    // Pushes attempted, none accepted — the profiler must not look healthy.
+    expect(s.pushedWindows).toBe(0);
+    expect(s.failedWindows).toBeGreaterThan(0);
+    expect(s.lastError).toContain("HTTP 400");
+
+    (globalThis as unknown as { fetch: unknown }).fetch = _fetchMock;
+  });
+
+  it("lists the enabled profile streams", async () => {
+    const cpuOnly = new BunPyroscope(BASE);
+    expect(cpuOnly.stats().streams).toEqual(["cpu"]);
+
+    const withWall = new BunPyroscope({ ...BASE, wallTime: { enabled: true } });
+    expect(withWall.stats().streams).toEqual(["cpu", "wall"]);
+  });
+
+  it("tracks running state across start and stop", async () => {
+    profiler = new BunPyroscope(BASE);
+    expect(profiler.stats().running).toBe(false);
+
+    await profiler.start();
+    expect(profiler.stats().running).toBe(true);
+
+    await profiler.stop();
+    expect(profiler.stats().running).toBe(false);
+    profiler = null;
+  });
+});
+
 describe("shutdown handlers", () => {
   function signalListenerCount() {
     return process.listenerCount("SIGTERM") + process.listenerCount("SIGINT");

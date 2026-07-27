@@ -6,7 +6,21 @@
  * to exist or the target sits permanently DOWN.
  */
 
-const LATENCY_BUCKETS_MS = [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000];
+/**
+ * Bucket edges concentrated where this demo's latencies actually land
+ * (~130ms parallel, ~250ms slow-query, ~280ms CPU, ~400ms waterfall,
+ * ~440ms checkout under load).
+ *
+ * histogram_quantile interpolates linearly *within* a bucket, so a coarse
+ * bucket makes the quantile a guess. With the previous 100/250/500/1000 edges
+ * nearly every request fell into 250→500, and p95 for the ~130ms
+ * /api/io/parallel route was reported as 466ms — the panel's whole purpose is
+ * comparing that route against the waterfall, so the resolution has to be finer
+ * than the difference being measured.
+ */
+const LATENCY_BUCKETS_MS = [
+  5, 10, 25, 50, 100, 150, 200, 250, 300, 350, 400, 500, 650, 800, 1000, 1500, 2500, 5000,
+];
 
 interface RouteStats {
   count: number;

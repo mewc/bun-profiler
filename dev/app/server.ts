@@ -66,7 +66,27 @@ const routes: Record<string, (req: Request) => Promise<Response> | Response> = {
       headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
     }),
 
-  "/health": () => Response.json({ status: "ok", app: APP_NAME }),
+  // Reports the profiler's own delivery state, not just "the process is up".
+  // A profiler that has stopped pushing is otherwise indistinguishable from an
+  // idle one, which is exactly how the gzip bug hid for so long.
+  "/health": () => {
+    const profiling = profiler.stats();
+
+    // Deliberately not "nothing pushed recently": an idle process produces no
+    // samples, so silence is normal and would flap the container healthcheck.
+    // What is never normal is the loop being dead, or every push failing.
+    //
+    // Note this cannot catch a server that accepts a push and stores nothing
+    // (the gzip case answered HTTP 200), which is why that is handled by
+    // defaulting compress off rather than by monitoring.
+    const degraded =
+      !profiling.running || (profiling.pushedWindows === 0 && profiling.failedWindows > 0);
+
+    return Response.json(
+      { status: degraded ? "degraded" : "ok", app: APP_NAME, profiling },
+      { status: degraded ? 503 : 200 }
+    );
+  },
 
   "/api/io/echo": (req) => handle("/api/io/echo", () => echo(new URL(req.url))),
 };

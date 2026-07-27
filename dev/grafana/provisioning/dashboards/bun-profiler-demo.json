@@ -147,7 +147,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (route) (rate(demo_http_requests_total[1m]))",
+          "expr": "sum by (route) (rate(demo_http_requests_total[$__rate_interval]))",
           "legendFormat": "{{route}}"
         }
       ]
@@ -198,7 +198,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (route, le) (rate(demo_http_request_duration_ms_bucket[1m])))",
+          "expr": "histogram_quantile(0.95, sum by (route, le) (rate(demo_http_request_duration_ms_bucket[$__rate_interval])))",
           "legendFormat": "{{route}}"
         }
       ]

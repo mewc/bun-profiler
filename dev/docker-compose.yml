@@ -24,13 +24,33 @@ services:
       - ..:/app
       - /app/node_modules # anonymous volume so container's node_modules isn't overwritten
     depends_on:
+      # Only service_started: Pyroscope ships without a shell, so it can't carry
+      # a healthcheck (see below). The profiler retries failed pushes anyway, so
+      # a not-yet-ready Pyroscope costs at most the first window.
       - pyroscope
     restart: unless-stopped
+    healthcheck:
+      # The image has no curl or wget, but it does have bun.
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "const r = await fetch('http://127.0.0.1:3000/health'); process.exit(r.ok ? 0 : 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   pyroscope:
     image: grafana/pyroscope:latest
     ports:
       - "${PYROSCOPE_PORT:-4042}:4040"
+    restart: unless-stopped
+    # No healthcheck: the image is distroless (no shell, no curl/wget), so
+    # there's no in-container command to run. dev/up.sh gates readiness on the
+    # app instead, which is the thing that actually has to talk to Pyroscope.
 
   grafana:
     image: grafana/grafana:latest
@@ -42,6 +62,13 @@ services:
       - GF_AUTH_DISABLE_LOGIN_FORM=true
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   prometheus:
     image: prom/prometheus:latest
@@ -49,3 +76,17 @@ services:
       - "${PROMETHEUS_PORT:-9091}:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # Overriding command drops the image defaults, so the config and data paths
+    # have to be restated alongside the retention cap.
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=6h
+      - --web.enable-lifecycle
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s

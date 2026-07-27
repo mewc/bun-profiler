@@ -14,6 +14,7 @@ export type {
   CdpNode,
   CdpProfile,
   HeapProfileNode,
+  ProfilerStats,
   SamplingHeapProfile,
 } from "./types.js";
 

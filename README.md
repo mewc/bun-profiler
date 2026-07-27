@@ -104,6 +104,43 @@ A delta larger than twice the sampling interval is treated as a gap: the stack i
 
 On Node.js/V8, which does emit real `(idle)` samples, those are already attributed correctly and are passed through untouched.
 
+## Checking the profiler is actually working
+
+Continuous profiling fails quietly. It runs in the background, and a profiler that has stopped delivering looks exactly like a service that happens to be idle — no data either way. `stats()` makes the difference visible:
+
+```ts
+const profiler = startProfiling({ pyroscopeUrl: "...", appName: "my-service" });
+
+Bun.serve({
+  routes: {
+    "/health": () => {
+      const s = profiler.stats();
+      // "Nothing pushed lately" is NOT a fault — an idle process produces no
+      // samples, so empty windows are correct. A dead loop, or pushes that have
+      // only ever failed, are unambiguous.
+      const degraded = !s.running || (s.pushedWindows === 0 && s.failedWindows > 0);
+      return Response.json(s, { status: degraded ? 503 : 200 });
+    },
+  },
+});
+```
+
+```json
+{
+  "running": true,
+  "pushedWindows": 42,
+  "failedWindows": 0,
+  "emptyWindows": 3,
+  "lastPushAt": 1785131313353,
+  "lastError": null,
+  "streams": ["cpu", "wall"]
+}
+```
+
+`emptyWindows` climbing alongside `pushedWindows` is normal. `emptyWindows` climbing while `pushedWindows` doesn't, on a service you know is busy, means the profiler isn't seeing your work.
+
+This reports what the transport did, so it catches a dead loop and rejected pushes. It cannot catch a server that accepts a push and stores nothing — see the `compress` warning above for the one case where that happens.
+
 ## Tagging a region of code
 
 `tag()` splits the profiling window so a specific block of work gets its own labelled stream — useful for a background job, a migration, or one hot endpoint:

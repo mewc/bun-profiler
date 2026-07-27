@@ -11,6 +11,7 @@ import { buildDefaultLabels, encodePyroscopeName, resolveAppName } from "./label
 import type {
   BunPyroscopeOptions,
   CdpProfile,
+  ProfilerStats,
   ResolvedConfig,
   SamplingHeapProfile,
 } from "./types.js";
@@ -82,6 +83,14 @@ export class BunPyroscope {
   private activeCycle: Promise<void> | null = null;
   /** Kept so stop() can remove them — otherwise every instance leaks two listeners. */
   private signalHandlers: { sigterm: () => void; sigint: () => void } | null = null;
+
+  // Counters backing stats(). A profiler that silently stops delivering is the
+  // failure mode that matters here, so it has to be observable from outside.
+  private pushedWindows = 0;
+  private failedWindows = 0;
+  private emptyWindows = 0;
+  private lastPushAt: number | null = null;
+  private lastError: string | null = null;
 
   constructor(options: BunPyroscopeOptions) {
     const appName = resolveAppName(options.appName);
@@ -259,7 +268,11 @@ export class BunPyroscope {
   private async endWindowAndPush(): Promise<void> {
     if (!this.session) return;
 
-    const windowEnd = Math.floor(Date.now() / 1000);
+    // Pyroscope's ingest range is in whole seconds. tag() ends a window as soon
+    // as its callback returns, and pushIntervalMs may be sub-second, so without
+    // this clamp a fast region yields from === until — a zero-length range that
+    // the server stores as an invisible instant.
+    const windowEnd = Math.max(Math.floor(Date.now() / 1000), this.windowStart + 1);
 
     let profile: CdpProfile;
     try {
@@ -276,6 +289,9 @@ export class BunPyroscope {
 
     const folded = convertToFolded(profile);
     if (!folded) {
+      // Counted, not pushed: normal for an idle process, but a run of these
+      // while the service is busy means the profiler isn't seeing the work.
+      this.emptyWindows++;
       this.log("debug", `Empty profile for window [${windowStart}-${windowEnd}], skipping`);
     } else {
       const sampleRate = calculateSampleRate(profile);
@@ -420,6 +436,8 @@ export class BunPyroscope {
           // open — this runs thousands of times over a process's lifetime.
           await response.arrayBuffer().catch(() => undefined);
           const lines = folded.split("\n").length;
+          this.pushedWindows++;
+          this.lastPushAt = Date.now();
           this.log("debug", `Pushed ${lines} stacks [${from}-${until}] HTTP ${response.status}`);
           return;
         }
@@ -431,19 +449,64 @@ export class BunPyroscope {
         // rate limit — Grafana Cloud returns this) and 408 are explicitly
         // retryable. Treating them as fatal drops every window for the whole
         // duration of a rate limit.
-        if (!err.retryable) throw err;
+        if (!err.retryable) {
+          this.recordFailure(err);
+          throw err;
+        }
 
         lastError = err;
         this.log("warn", `Push failed (attempt ${attempt + 1}): ${err.message}`);
       } catch (fetchErr) {
         // Non-retryable HTTP status — propagate rather than burning retries.
-        if (fetchErr instanceof PushError && !fetchErr.retryable) throw fetchErr;
+        if (fetchErr instanceof PushError && !fetchErr.retryable) {
+          this.recordFailure(fetchErr);
+          throw fetchErr;
+        }
         lastError = fetchErr instanceof Error ? fetchErr : new Error(String(fetchErr));
         this.log("warn", `Push error (attempt ${attempt + 1}): ${lastError.message}`);
       }
     }
 
-    if (lastError) throw lastError;
+    if (lastError) {
+      this.recordFailure(lastError);
+      throw lastError;
+    }
+  }
+
+  private recordFailure(err: Error): void {
+    this.failedWindows++;
+    this.lastError = err.message;
+  }
+
+  /**
+   * A snapshot of what the profiler has actually delivered.
+   *
+   * Continuous profiling fails quietly: a broken push loop looks exactly like an
+   * idle process. Surface this from a health endpoint so the difference is
+   * visible.
+   *
+   * @example
+   * const s = profiler.stats();
+   * // Note "nothing pushed lately" is NOT a fault: an idle process produces no
+   * // samples, so windows are legitimately empty. A dead loop, or pushes that
+   * // have only ever failed, are unambiguous.
+   * const degraded = !s.running || (s.pushedWindows === 0 && s.failedWindows > 0);
+   * return Response.json(s, { status: degraded ? 503 : 200 });
+   */
+  stats(): ProfilerStats {
+    const streams = ["cpu"];
+    if (this.config.wallTime.enabled) streams.push("wall");
+    if (this.config.heap.enabled) streams.push("alloc_space");
+
+    return {
+      running: this.running,
+      pushedWindows: this.pushedWindows,
+      failedWindows: this.failedWindows,
+      emptyWindows: this.emptyWindows,
+      lastPushAt: this.lastPushAt,
+      lastError: this.lastError,
+      streams,
+    };
   }
 
   /**

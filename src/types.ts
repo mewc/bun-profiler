@@ -149,6 +149,38 @@ export interface BunPyroscopeOptions {
   };
 }
 
+/**
+ * A snapshot of what the profiler has actually managed to do.
+ *
+ * Continuous profiling fails quietly by nature: it runs in the background, and
+ * a broken push looks exactly like an idle process — no data either way. Expose
+ * this from a health endpoint so a profiler that has stopped delivering is
+ * visible rather than merely absent.
+ *
+ * It reports what the transport did, so it catches a dead loop and rejected
+ * pushes. It cannot catch a server that accepts a push and then stores nothing.
+ */
+export interface ProfilerStats {
+  /** Whether the push loop is currently active. */
+  running: boolean;
+  /** Windows accepted by the server. */
+  pushedWindows: number;
+  /** Windows dropped after exhausting retries. */
+  failedWindows: number;
+  /**
+   * Windows that produced no samples and were skipped. Entirely normal for an
+   * idle process; a count that tracks pushedWindows means the profiler isn't
+   * seeing your workload.
+   */
+  emptyWindows: number;
+  /** ms since epoch of the last accepted push, or null if none has succeeded. */
+  lastPushAt: number | null;
+  /** Message from the most recent failure, or null. */
+  lastError: string | null;
+  /** Profile types being pushed, e.g. ["cpu", "wall"]. */
+  streams: string[];
+}
+
 /** Internal fully-resolved configuration with all defaults applied. */
 export interface ResolvedConfig {
   pyroscopeUrl: string;
