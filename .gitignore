@@ -35,3 +35,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # local npm auth (never commit)
 .npmrc
+
+# Conductor: shared settings are committed, per-machine overrides are not
+.conductor/settings.local.toml
+
+# Conductor workspace scratch space
+.context

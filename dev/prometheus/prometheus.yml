@@ -1,7 +1,17 @@
 global:
-  scrape_interval: 15s
+  # 5s rather than the usual 15s: this stack is something you watch for a couple
+  # of minutes, and at 15s a 1-minute rate window has only 4 points — enough to
+  # look jagged and to read as "No data" shortly after a restart.
+  scrape_interval: 5s
+  scrape_timeout: 4s
 
 scrape_configs:
   - job_name: bun-app
     static_configs:
       - targets: ["app:3000"]
+
+  # Prometheus scraping itself, so the Targets page shows something even when
+  # the demo app is down and you're trying to work out which half is broken.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

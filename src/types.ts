@@ -113,9 +113,14 @@ export interface BunPyroscopeOptions {
 
   /**
    * Whether to gzip-compress the request body before pushing to Pyroscope.
-   * Disable for local development where bandwidth is cheap and to avoid
-   * potential issues with Bun's fetch handling of compressed request bodies.
-   * Default: true
+   *
+   * Default: false.
+   *
+   * Leave this off unless you have confirmed your server accepts it. Grafana
+   * Pyroscope's `/ingest` endpoint does not decompress `format=folded` bodies:
+   * verified against `grafana/pyroscope:latest`, a gzipped body is answered
+   * with HTTP 200 and then stored as an empty profile. The failure is
+   * invisible — pushes look successful and no data ever appears.
    */
   compress?: boolean;
 
@@ -142,6 +147,38 @@ export interface BunPyroscopeOptions {
   wallTime?: {
     enabled: boolean;
   };
+}
+
+/**
+ * A snapshot of what the profiler has actually managed to do.
+ *
+ * Continuous profiling fails quietly by nature: it runs in the background, and
+ * a broken push looks exactly like an idle process — no data either way. Expose
+ * this from a health endpoint so a profiler that has stopped delivering is
+ * visible rather than merely absent.
+ *
+ * It reports what the transport did, so it catches a dead loop and rejected
+ * pushes. It cannot catch a server that accepts a push and then stores nothing.
+ */
+export interface ProfilerStats {
+  /** Whether the push loop is currently active. */
+  running: boolean;
+  /** Windows accepted by the server. */
+  pushedWindows: number;
+  /** Windows dropped after exhausting retries. */
+  failedWindows: number;
+  /**
+   * Windows that produced no samples and were skipped. Entirely normal for an
+   * idle process; a count that tracks pushedWindows means the profiler isn't
+   * seeing your workload.
+   */
+  emptyWindows: number;
+  /** ms since epoch of the last accepted push, or null if none has succeeded. */
+  lastPushAt: number | null;
+  /** Message from the most recent failure, or null. */
+  lastError: string | null;
+  /** Profile types being pushed, e.g. ["cpu", "wall"]. */
+  streams: string[];
 }
 
 /** Internal fully-resolved configuration with all defaults applied. */

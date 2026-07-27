@@ -53,10 +53,14 @@
     "lint": "biome check src test",
     "lint:fix": "biome check --write src test",
     "l": "bun run typecheck && bun run lint && bun test",
-    "dev": "cd dev && docker compose up --build -d && echo '\\n  App:        http://localhost:3002\\n  Pyroscope:   http://localhost:4042\\n  Grafana:     http://localhost:3003\\n  Prometheus:  http://localhost:9091\\n'",
-    "dev:down": "cd dev && docker compose down",
-    "dev:logs": "cd dev && docker compose logs -f app",
-    "dev:restart": "cd dev && docker compose restart app",
+    "dev": "dev/up.sh",
+    "dev:demo": "dev/up.sh --load",
+    "dev:down": "dev/down.sh",
+    "dev:logs": "dev/compose.sh logs -f app",
+    "dev:restart": "dev/compose.sh restart app",
+    "dev:load": "dev/loadgen.sh",
+    "dev:reset": "dev/down.sh && dev/up.sh",
+    "screenshots": "dev/screenshots.sh",
     "smoke": "bun smoke-test.ts",
     "release:patch": "npm version patch && git push --follow-tags",
     "release:minor": "npm version minor && git push --follow-tags",
@@ -66,6 +70,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.4.2",
     "@types/node": "^25.3.0",
+    "playwright": "^1.62.0",
     "typescript": "^5.9.3"
   },
   "engines": {

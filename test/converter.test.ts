@@ -235,6 +235,14 @@ describe("convertToFolded", () => {
   });
 });
 
+/**
+ * The fixtures below use synthetic timeDeltas in the 100ms–1s range. A delta is
+ * only "normal" relative to the sampler's configured interval, so these tests
+ * declare a matching coarse interval. Sampling-gap behaviour (deltas far larger
+ * than the interval) is covered separately in its own describe block.
+ */
+const COARSE_INTERVAL_US = 500_000;
+
 describe("convertToFoldedWallTime", () => {
   it("returns empty string for empty samples", () => {
     const profile = makeProfile([{ id: 1, name: "(root)" }], []);
@@ -273,7 +281,7 @@ describe("convertToFoldedWallTime", () => {
       1_000_000,
       [100_000, 900_000] // 100ms + 900ms
     );
-    expect(convertToFoldedWallTime(profile)).toBe("myFunc 1000000");
+    expect(convertToFoldedWallTime(profile, COARSE_INTERVAL_US)).toBe("myFunc 1000000");
   });
 
   it("weights different stacks by their individual timeDeltas", () => {
@@ -288,7 +296,7 @@ describe("convertToFoldedWallTime", () => {
       1_000_000,
       [10_000, 500_000, 490_000] // fast=10ms, slow=500ms+490ms
     );
-    const result = convertToFoldedWallTime(profile);
+    const result = convertToFoldedWallTime(profile, COARSE_INTERVAL_US);
     const lines = result.split("\n");
     expect(lines).toContain("fast 10000");
     expect(lines).toContain("slow 990000");
@@ -306,7 +314,7 @@ describe("convertToFoldedWallTime", () => {
       1_000_000,
       [800_000, 200_000]
     );
-    const result = convertToFoldedWallTime(profile);
+    const result = convertToFoldedWallTime(profile, COARSE_INTERVAL_US);
     const lines = result.split("\n");
     expect(lines).toContain("(idle) 800000");
     expect(lines).toContain("userCode 200000");
@@ -325,7 +333,7 @@ describe("convertToFoldedWallTime", () => {
       1_000_000,
       [500_000]
     );
-    const result = convertToFoldedWallTime(profile);
+    const result = convertToFoldedWallTime(profile, COARSE_INTERVAL_US);
     expect(result).not.toContain("(root)");
     expect(result).not.toContain("node:inspector");
     expect(result).toContain("parent");
@@ -343,7 +351,7 @@ describe("convertToFoldedWallTime", () => {
       1_000_000,
       [0, 500_000, 500_000] // first sample has 0 delta (common for first sample)
     );
-    expect(convertToFoldedWallTime(profile)).toBe("myFunc 1000000");
+    expect(convertToFoldedWallTime(profile, COARSE_INTERVAL_US)).toBe("myFunc 1000000");
   });
 
   it("handles branching tree weighted by time", () => {
@@ -359,7 +367,7 @@ describe("convertToFoldedWallTime", () => {
       1_000_000,
       [400_000, 500_000, 100_000] // fetchAPI=900ms (I/O), compute=100ms (CPU)
     );
-    const result = convertToFoldedWallTime(profile);
+    const result = convertToFoldedWallTime(profile, COARSE_INTERVAL_US);
     const lines = result.split("\n");
     expect(lines).toContain("handler;fetchAPI 900000");
     expect(lines).toContain("handler;compute 100000");
@@ -381,7 +389,7 @@ describe("convertToFoldedWallTime", () => {
       1_000_000,
       [500_000]
     );
-    const result = convertToFoldedWallTime(profile);
+    const result = convertToFoldedWallTime(profile, COARSE_INTERVAL_US);
     expect(result).toContain("deep/handler.ts");
     expect(result).not.toContain("/home/user/my-project");
   });
@@ -418,13 +426,111 @@ describe("convertToFoldedWallTime", () => {
         1_000_000, 1_000_000,
       ]
     );
-    const result = convertToFoldedWallTime(profile);
+    const result = convertToFoldedWallTime(profile, COARSE_INTERVAL_US);
     const lines = result.split("\n");
     // 7 idle samples × 1_000_000 = 7_000_000
     expect(lines).toContain("(idle) 7000000");
     // 3 processData samples (leaf=4, stack=handleRequest;processData) × 1_000_000 = 3_000_000
     expect(lines).toContain("handleRequest;processData 3000000");
     expect(lines).toHaveLength(2);
+  });
+});
+
+/**
+ * Bun/JavaScriptCore emits no "(idle)" samples and stops sampling entirely
+ * while the process is parked on I/O. The first sample after a wait therefore
+ * carries a delta spanning the whole wait. Attributing that to the sampled
+ * stack blames the function that resumed for time it never spent, so the
+ * converter splits oversized deltas into one sampling interval of on-CPU time
+ * plus an explicit "(idle)" remainder.
+ */
+describe("convertToFoldedWallTime — sampling gaps (Bun/JSC has no idle samples)", () => {
+  const INTERVAL_US = 10_000;
+
+  it("books an oversized delta to (idle) instead of the stack that resumed", () => {
+    // renderReceipt was on CPU for ~1 interval, but the sample after a 300ms
+    // await carries the whole 300ms.
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2] },
+        { id: 2, name: "renderReceipt" },
+      ],
+      [2],
+      0,
+      310_000,
+      [310_000]
+    );
+
+    const lines = convertToFoldedWallTime(profile, INTERVAL_US).split("\n");
+
+    expect(lines).toContain("renderReceipt 10000");
+    expect(lines).toContain("(idle) 300000");
+  });
+
+  it("leaves deltas within jitter of the sampling interval untouched", () => {
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2] },
+        { id: 2, name: "hotLoop" },
+      ],
+      [2, 2, 2],
+      0,
+      45_000,
+      [10_000, 15_000, 20_000] // all <= 2x interval, i.e. ordinary jitter
+    );
+
+    expect(convertToFoldedWallTime(profile, INTERVAL_US)).toBe("hotLoop 45000");
+  });
+
+  it("does not split when the runtime does report a real (idle) leaf", () => {
+    // V8 emits genuine (idle) samples; that attribution is already correct.
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2] },
+        { id: 2, name: "(idle)" },
+      ],
+      [2],
+      0,
+      500_000,
+      [500_000]
+    );
+
+    expect(convertToFoldedWallTime(profile, INTERVAL_US)).toBe("(idle) 500000");
+  });
+
+  it("totals still reconcile to the full wall-clock window", () => {
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2, 3] },
+        { id: 2, name: "cpuWork" },
+        { id: 3, name: "afterAwait" },
+      ],
+      [2, 3],
+      0,
+      260_000,
+      [10_000, 250_000]
+    );
+
+    const total = convertToFoldedWallTime(profile, INTERVAL_US)
+      .split("\n")
+      .reduce((sum, line) => sum + Number(line.slice(line.lastIndexOf(" ") + 1)), 0);
+
+    expect(total).toBe(260_000);
+  });
+
+  it("treats a negative delta as zero rather than positive time", () => {
+    const profile = makeProfile(
+      [
+        { id: 1, name: "(root)", children: [2] },
+        { id: 2, name: "myFunc" },
+      ],
+      [2, 2],
+      0,
+      10_000,
+      [-50_000, 10_000] // clock regression, then a normal sample
+    );
+
+    expect(convertToFoldedWallTime(profile, INTERVAL_US)).toBe("myFunc 10000");
   });
 });
 

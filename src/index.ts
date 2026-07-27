@@ -1,4 +1,12 @@
-export { convertToFoldedWallTime } from "./converter.js";
+// The converters are exported so callers can post-process or inspect profiles
+// themselves; only convertToFoldedWallTime used to be, which was inconsistent.
+export {
+  calculateSampleRate,
+  convertHeapToFolded,
+  convertToFolded,
+  convertToFoldedWallTime,
+  IDLE_FRAME,
+} from "./converter.js";
 export { BunPyroscope } from "./profiler.js";
 export type {
   BunPyroscopeOptions,
@@ -6,6 +14,7 @@ export type {
   CdpNode,
   CdpProfile,
   HeapProfileNode,
+  ProfilerStats,
   SamplingHeapProfile,
 } from "./types.js";
 
@@ -17,13 +26,13 @@ import type { BunPyroscopeOptions } from "./types.js";
  * Returns the BunPyroscope instance so the caller can stop() it later.
  *
  * @example
- * import { startProfiling } from "bun-pyroscope";
+ * import { startProfiling } from "bun-profiler";
  * startProfiling({ pyroscopeUrl: "http://localhost:4040" });
  */
 export function startProfiling(options: BunPyroscopeOptions): BunPyroscope {
   const profiler = new BunPyroscope(options);
   profiler.start().catch((err: unknown) => {
-    console.warn("[bun-pyroscope] Failed to start profiling:", err);
+    console.warn("[bun-profiler] Failed to start profiling:", err);
   });
   return profiler;
 }
