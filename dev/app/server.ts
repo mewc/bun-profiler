@@ -16,6 +16,15 @@ const APP_NAME = process.env.SERVICE_NAME ?? "bun-profiler-demo";
 const PORT = Number(process.env.PORT ?? 3000);
 const PUSH_INTERVAL_MS = Number(process.env.PUSH_INTERVAL_MS ?? 5_000);
 
+// Published ports differ per checkout (Conductor gives each workspace its own
+// range), so compose passes the host-side URLs in rather than the panel
+// guessing them.
+const PANEL_LINKS = {
+  grafana: process.env.PUBLIC_GRAFANA_URL ?? "http://localhost:3003",
+  pyroscope: process.env.PUBLIC_PYROSCOPE_URL ?? "http://localhost:4042",
+  prometheus: process.env.PUBLIC_PROMETHEUS_URL ?? "http://localhost:9091",
+};
+
 const profiler = new BunPyroscope({
   pyroscopeUrl: PYROSCOPE_URL,
   appName: APP_NAME,
@@ -48,7 +57,7 @@ async function handle(
 
 const routes: Record<string, (req: Request) => Promise<Response> | Response> = {
   "/": () =>
-    new Response(renderPanel(APP_NAME, PYROSCOPE_URL), {
+    new Response(renderPanel(APP_NAME, PYROSCOPE_URL, PANEL_LINKS), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     }),
 

@@ -63,7 +63,24 @@ function renderGroup(kind: Workload["kind"]): string {
     </section>`;
 }
 
-export function renderPanel(appName: string, pyroscopeUrl: string): string {
+export interface PanelLinks {
+  /** Host-side URLs — published ports vary per workspace, so they're injected. */
+  grafana: string;
+  pyroscope: string;
+  prometheus: string;
+}
+
+/** ":3003" from "http://localhost:3003", or "" if the URL has no explicit port. */
+function portLabel(url: string): string {
+  try {
+    const { port } = new URL(url);
+    return port ? `:${port}` : "";
+  } catch {
+    return "";
+  }
+}
+
+export function renderPanel(appName: string, pyroscopeUrl: string, links: PanelLinks): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -135,10 +152,9 @@ export function renderPanel(appName: string, pyroscopeUrl: string): string {
   <p class="sub">Profiling <code>${escapeHtml(appName)}</code> → <code>${escapeHtml(pyroscopeUrl)}</code>, pushed every 5s. CPU and wall-time streams are both enabled.</p>
 
   <div class="links">
-    <a href="http://localhost:4042" target="_blank">Pyroscope <small>:4042</small></a>
-    <a href="http://localhost:3003/d/bun-profiler-demo" target="_blank">Grafana dashboard <small>:3003</small></a>
-    <a href="http://localhost:3003/a/grafana-pyroscope-app/single" target="_blank">Grafana flamegraphs <small>:3003</small></a>
-    <a href="http://localhost:9091/targets" target="_blank">Prometheus <small>:9091</small></a>
+    <a href="${links.grafana}/d/bun-profiler-demo" target="_blank">Grafana dashboard <small>${portLabel(links.grafana)}</small></a>
+    <a href="${links.pyroscope}" target="_blank">Pyroscope <small>${portLabel(links.pyroscope)}</small></a>
+    <a href="${links.prometheus}/targets" target="_blank">Prometheus <small>${portLabel(links.prometheus)}</small></a>
     <a href="/metrics" target="_blank">/metrics</a>
   </div>
 

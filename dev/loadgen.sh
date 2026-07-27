@@ -10,8 +10,11 @@
 
 set -uo pipefail
 
+# shellcheck source=./_env.sh
+source "$(dirname "$0")/_env.sh"
+
 DURATION=${1:-60}
-BASE=${2:-http://localhost:3002}
+BASE=${2:-$APP_URL}
 CONCURRENCY=${CONCURRENCY:-4}
 
 # Repeated entries = higher weight.
@@ -55,8 +58,8 @@ wait
 
 echo "Done — $COUNT requests in ${DURATION}s"
 echo
-echo "  Pyroscope   http://localhost:4042"
-echo "  Grafana     http://localhost:3003/d/bun-profiler-demo"
+echo "  Pyroscope   http://localhost:${PYROSCOPE_PORT}"
+echo "  Grafana     http://localhost:${GRAFANA_PORT}/d/bun-profiler-demo"
 echo
 echo "In Pyroscope, compare these two streams:"
 echo "  bun-profiler-demo.cpu{}    — where CPU time goes"

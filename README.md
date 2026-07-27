@@ -164,13 +164,14 @@ Extra labels passed via the `labels` option override auto-detected values.
 A complete demo stack — Bun app, Pyroscope, Grafana, Prometheus — lives in [`dev/`](./dev).
 
 ```sh
-bun run dev        # start everything
-bun run dev:load   # drive ~60s of mixed traffic
+bun run dev:demo   # start everything, then drive 60s of traffic
 ```
 
-Then open <http://localhost:3003/d/bun-profiler-demo>.
+It waits until the stack is serving and prints the URLs — by default
+<http://localhost:3003/d/bun-profiler-demo>. (Ports are per-workspace under
+[Conductor](https://conductor.build), so take them from the output.)
 
-The demo server exposes workloads with deliberately distinct flamegraph shapes — deep recursion, a hot comparator, regex scanning, crypto — alongside I/O-bound ones and a realistic mixed `/api/checkout` pipeline. Drive them from the panel at <http://localhost:3002>:
+The demo server exposes workloads with deliberately distinct flamegraph shapes — deep recursion, a hot comparator, regex scanning, crypto — alongside I/O-bound ones and a realistic mixed `/api/checkout` pipeline. Drive them from the panel the script links to (<http://localhost:3002> by default):
 
 ![Demo control panel](./docs/images/demo-panel.png)
 

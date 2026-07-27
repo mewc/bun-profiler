@@ -12,30 +12,57 @@ demo and `src/` instantly.
 ## Quick start
 
 ```bash
-bun run dev        # build & start everything (detached)
-bun run dev:load   # drive ~60s of mixed traffic
+bun run dev:demo   # start everything, then drive 60s of traffic
 ```
 
-Then open <http://localhost:3003/d/bun-profiler-demo> and compare the two
-flamegraphs.
+`dev/up.sh` waits until the app is actually serving and then prints the URLs it
+published — don't hardcode them, see [Ports](#ports) below.
 
-| Command               | What it does                                     |
-| --------------------- | ------------------------------------------------ |
-| `bun run dev`         | Build and start all services                     |
-| `bun run dev:load`    | Drive mixed traffic (`dev/loadgen.sh [seconds]`) |
-| `bun run dev:logs`    | Tail app logs (profiler pushes are logged)       |
-| `bun run dev:restart` | Restart just the app                             |
-| `bun run dev:reset`   | Wipe all profile data and rebuild from scratch   |
-| `bun run dev:down`    | Stop everything and delete volumes               |
+| Command               | What it does                                      |
+| --------------------- | ------------------------------------------------- |
+| `bun run dev`         | Build and start all services, wait until healthy   |
+| `bun run dev:demo`    | Same, then generate traffic so nothing is empty    |
+| `bun run dev:load`    | Drive mixed traffic (`dev/loadgen.sh [seconds]`)   |
+| `bun run dev:logs`    | Tail app logs (profiler pushes are logged)         |
+| `bun run dev:restart` | Restart just the app                               |
+| `bun run dev:reset`   | Wipe all profile data and rebuild from scratch     |
+| `bun run dev:down`    | Stop this workspace's stack and delete its volumes |
 
 ## Services
 
-| Service    | URL                                         | Notes                           |
+| Service    | Default URL                                 | Notes                           |
 | ---------- | ------------------------------------------- | ------------------------------- |
 | Demo panel | <http://localhost:3002>                     | Run any workload from a browser |
 | Grafana    | <http://localhost:3003/d/bun-profiler-demo> | Provisioned dashboard, no login |
 | Pyroscope  | <http://localhost:4042>                     | Raw profile storage & UI        |
 | Prometheus | <http://localhost:9091>                     | Scrapes the app's `/metrics`    |
+
+## Ports
+
+Those defaults apply to a plain checkout. Under Conductor, each workspace gets
+its own block of ten ports via `CONDUCTOR_PORT`, and the stack runs under its own
+Compose project name (`bun-profiler-<workspace>`):
+
+| Service    | Port                |
+| ---------- | ------------------- |
+| Demo panel | `CONDUCTOR_PORT`    |
+| Grafana    | `CONDUCTOR_PORT`+1  |
+| Pyroscope  | `CONDUCTOR_PORT`+2  |
+| Prometheus | `CONDUCTOR_PORT`+3  |
+
+Both are needed for parallel workspaces. Without per-workspace ports the second
+workspace fails to bind; without a per-workspace project name Compose would name
+every stack after the `dev` directory, so `up` in one workspace would recreate
+another workspace's containers and `down` would delete them.
+
+`dev/_env.sh` resolves this and is sourced by every script here, so
+`dev/up.sh`, `dev/down.sh`, `dev/loadgen.sh` and `dev/compose.sh` always agree on
+which stack they are talking to. Override any of `APP_PORT`, `GRAFANA_PORT`,
+`PYROSCOPE_PORT`, `PROMETHEUS_PORT` or `COMPOSE_PROJECT_NAME` to pin them
+yourself.
+
+Run an arbitrary Compose command against this workspace's stack with
+`dev/compose.sh`, e.g. `dev/compose.sh ps`.
 
 ## The workloads
 
@@ -78,11 +105,26 @@ sample gap is split into one sampling interval of on-CPU time plus an `(idle)`
 remainder. See the "Wall-time profiling" section of the root README for why
 attributing the whole gap to the sampled stack would be actively misleading.
 
+## Conductor
+
+`.conductor/settings.toml` registers these as run scripts, so the stack is
+startable from the Run tab: **dev** (start), **demo** (start + traffic), **load**,
+**test**, **check**. `run_mode` is `concurrent` because the port and project-name
+isolation above makes it safe for several workspaces to run the stack at once.
+
+Shared settings only take effect once merged to the default branch. To use them
+before that, copy the file to `.conductor/settings.local.toml` in the repository
+root — that path is read immediately and is gitignored.
+
 ## Troubleshooting
 
 **Grafana exits with `Datasource provisioning error: data source not found`.**
 You have an older Grafana container whose database predates the datasource UIDs.
 `bun run dev:reset` clears it.
+
+**Ports already allocated.** Another stack is using them — most likely an older
+`dev`-named project from before the per-workspace naming. Check with
+`docker compose -p dev ps` and remove it with `docker compose -p dev down -v`.
 
 **`all predefined address pools have been fully subnetted`.** Docker has run out
 of network address space, usually from many stopped Compose projects. Reclaim it

@@ -1,10 +1,25 @@
+# Every published port and the project name are overridable so that several
+# checkouts (e.g. parallel Conductor workspaces) can run this stack at once.
+# `dev/up.sh` derives them from CONDUCTOR_PORT; the defaults below are what you
+# get when running `docker compose` directly.
+#
+# COMPOSE_PROJECT_NAME (env) overrides the `name` below.
+name: bun-profiler-dev
+
 services:
   app:
     build:
       context: ..
       dockerfile: dev/Dockerfile.app
     ports:
-      - "3002:3000"
+      - "${APP_PORT:-3002}:3000"
+    environment:
+      # The panel renders absolute links to the sibling services, so it needs
+      # the host-side ports — inside the container it cannot know them.
+      - PUBLIC_APP_URL=http://localhost:${APP_PORT:-3002}
+      - PUBLIC_GRAFANA_URL=http://localhost:${GRAFANA_PORT:-3003}
+      - PUBLIC_PYROSCOPE_URL=http://localhost:${PYROSCOPE_PORT:-4042}
+      - PUBLIC_PROMETHEUS_URL=http://localhost:${PROMETHEUS_PORT:-9091}
     volumes:
       - ..:/app
       - /app/node_modules # anonymous volume so container's node_modules isn't overwritten
@@ -15,12 +30,12 @@ services:
   pyroscope:
     image: grafana/pyroscope:latest
     ports:
-      - "4042:4040"
+      - "${PYROSCOPE_PORT:-4042}:4040"
 
   grafana:
     image: grafana/grafana:latest
     ports:
-      - "3003:3000"
+      - "${GRAFANA_PORT:-3003}:3000"
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
@@ -31,6 +46,6 @@ services:
   prometheus:
     image: prom/prometheus:latest
     ports:
-      - "9091:9090"
+      - "${PROMETHEUS_PORT:-9091}:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
