@@ -16,6 +16,7 @@ source "$(dirname "$0")/_env.sh"
 DURATION=${1:-60}
 BASE=${2:-$APP_URL}
 CONCURRENCY=${CONCURRENCY:-4}
+READY_TIMEOUT=${LOADGEN_READY_TIMEOUT:-30}
 
 # Repeated entries = higher weight.
 ENDPOINTS=(
@@ -35,7 +36,16 @@ ENDPOINTS=(
   /api/cpu/hash
 )
 
-if ! curl -fsS "$BASE/health" >/dev/null 2>&1; then
+ready=0
+for ((attempt = 0; attempt < READY_TIMEOUT; attempt++)); do
+  if curl -fsS --max-time 2 "$BASE/health" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+
+if [[ "$ready" != 1 ]]; then
   echo "error: demo server is not responding at $BASE" >&2
   echo "       start it with:  bun run dev" >&2
   exit 1
