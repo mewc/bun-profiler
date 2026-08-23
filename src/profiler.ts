@@ -1,155 +1,136 @@
 import type { Session } from "node:inspector/promises";
-import { promisify } from "node:util";
-import { gzip } from "node:zlib";
+import { optionsFromEnv, resolveConfig } from "./config.js";
 import {
   calculateSampleRate,
   convertHeapToFolded,
   convertToFolded,
   convertToFoldedWallTime,
 } from "./converter.js";
-import { buildDefaultLabels, encodePyroscopeName, resolveAppName } from "./labels.js";
+import { ProfilerConcurrencyError, ProfilerConfigError } from "./errors.js";
+import { ExporterRunner } from "./exporter-runner.js";
+import { pyroscopeExporter } from "./exporters.js";
+import { SourceMapResolver } from "./source-maps.js";
 import type {
   BunPyroscopeOptions,
   CdpProfile,
+  ProfilerMemoryStats,
   ProfilerStats,
+  ProfileWindow,
   ResolvedConfig,
   SamplingHeapProfile,
 } from "./types.js";
 
-const gzipAsync = promisify(gzip);
+const ACTIVE_PROFILER = Symbol.for("bun-profiler.active-profiler");
+const registry = globalThis as typeof globalThis & { [ACTIVE_PROFILER]?: BunPyroscope };
 
-/**
- * View a Buffer as a plain Uint8Array — Bun's fetch handles this more reliably
- * than a Buffer subclass. The view shares Buffer's pooled ArrayBuffer, which is
- * fine because byteOffset/byteLength scope it to exactly this buffer's bytes.
- */
-function toUint8Array(buf: Buffer): Uint8Array {
-  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+interface CapturedWindow {
+  profile: CdpProfile;
+  heapProfile?: SamplingHeapProfile;
+  from: number;
+  until: number;
+  labels: Readonly<Record<string, string>>;
+  sampleIntervalUs: number;
 }
 
-/**
- * A non-2xx response from the Pyroscope ingest endpoint.
- *
- * Carries the status so retry decisions are made on a typed field rather than
- * by sniffing the message string.
- */
-class PushError extends Error {
-  readonly status: number;
-
-  constructor(status: number, body: string) {
-    super(`HTTP ${status}: ${body}`);
-    this.name = "PushError";
-    this.status = status;
-  }
-
-  /** 5xx is transient; 429/408 are explicitly retryable. Other 4xx are not. */
-  get retryable(): boolean {
-    return this.status >= 500 || this.status === 429 || this.status === 408;
-  }
-}
-
-/**
- * BunPyroscope manages a continuous CPU profiling loop for Bun processes.
- *
- * Lifecycle:
- *   new BunPyroscope(options) — resolves config, no side effects
- *   await profiler.start()    — connects session, begins push loop
- *   await profiler.stop()     — stops loop, flushes final profile, disconnects
- *
- * Push loop per window:
- *   1. Record windowStart (Unix seconds)
- *   2. Profiler.start
- *   3. Wait pushIntervalMs
- *   4. Profiler.stop → CdpProfile
- *   5. Convert to folded stacks + gzip
- *   6. POST to Pyroscope /ingest (with retry)
- *   7. Goto 1 (if still running)
- *
- * Push failures never stop profiling. After maxRetries, the window is
- * dropped and profiling continues normally.
- */
 export class BunPyroscope {
   private readonly config: ResolvedConfig;
+  private readonly runners: ExporterRunner[];
   private session: Session | null = null;
   private pushTimer: ReturnType<typeof setTimeout> | null = null;
   private running = false;
+  private profileActive = false;
   private windowStart = 0;
-  private inFlightPushes = new Set<Promise<void>>();
-  /**
-   * The flush/restart cycle currently executing in the timer callback.
-   * clearTimeout cannot cancel a callback that has already fired, so stop()
-   * and tag() await this to avoid issuing a second concurrent Profiler.stop.
-   */
+  private windowLabels: Readonly<Record<string, string>> = Object.freeze({});
   private activeCycle: Promise<void> | null = null;
-  /** Kept so stop() can remove them — otherwise every instance leaks two listeners. */
+  private stopPromise: Promise<void> | null = null;
+  private tagActive = false;
   private signalHandlers: { sigterm: () => void; sigint: () => void } | null = null;
-
-  // Counters backing stats(). A profiler that silently stops delivering is the
-  // failure mode that matters here, so it has to be observable from outside.
-  private pushedWindows = 0;
-  private failedWindows = 0;
+  private capturedWindows = 0;
+  private capturedSamples = 0;
+  private captureFailures = 0;
   private emptyWindows = 0;
-  private lastPushAt: number | null = null;
-  private lastError: string | null = null;
+  private lastCaptureGapMs: number | null = null;
+  private maxCaptureGapMs = 0;
+  private lastConversionDurationMs: number | null = null;
+  private currentSampleIntervalUs: number;
+  private samplingIntervalChanges = 0;
+  private jscHeapStats: (() => Record<string, number>) | null = null;
+  private readonly sourceMapResolver: SourceMapResolver | null;
 
   constructor(options: BunPyroscopeOptions) {
-    const appName = resolveAppName(options.appName);
-    const defaultLabels = buildDefaultLabels(appName);
-
-    this.config = {
-      pyroscopeUrl: options.pyroscopeUrl.replace(/\/$/, ""),
-      appName,
-      sampleIntervalUs: options.sampleIntervalUs ?? 10_000,
-      pushIntervalMs: options.pushIntervalMs ?? 15_000,
-      labels: { ...defaultLabels, ...(options.labels ?? {}) },
-      authToken: options.authToken,
-      basicAuth: options.basicAuth,
-      maxRetries: options.maxRetries ?? 2,
-      debug: options.debug ?? false,
-      // Defaults to false: Pyroscope's /ingest silently discards gzipped
-      // folded bodies (HTTP 200, empty profile stored). See BunPyroscopeOptions.
-      compress: options.compress ?? false,
-      heap: {
-        enabled: options.heap?.enabled ?? false,
-        samplingIntervalBytes: options.heap?.samplingIntervalBytes ?? 32_768,
-      },
-      wallTime: {
-        enabled: options.wallTime?.enabled ?? false,
-      },
-    };
+    this.config = resolveConfig(options);
+    this.currentSampleIntervalUs = this.config.sampleIntervalUs;
+    this.sourceMapResolver = this.config.sourceMaps.enabled
+      ? new SourceMapResolver(this.config.sourceMaps.cacheSize)
+      : null;
+    const exporters = [...this.config.exporters];
+    if (this.config.pyroscopeUrl) {
+      exporters.unshift(
+        pyroscopeExporter({
+          url: this.config.pyroscopeUrl,
+          authToken: this.config.authToken,
+          basicAuth: this.config.basicAuth,
+          tenantId: this.config.tenantId,
+          headers: this.config.headers,
+          compress: this.config.compress,
+          format: this.config.pyroscopeFormat,
+          timeoutMs: this.config.exportTimeoutMs,
+        })
+      );
+    }
+    const names = new Set<string>();
+    for (const exporter of exporters) {
+      if (!exporter.name.trim()) throw new ProfilerConfigError("exporter name must not be empty");
+      if (names.has(exporter.name)) {
+        throw new ProfilerConfigError(`duplicate exporter name ${JSON.stringify(exporter.name)}`);
+      }
+      names.add(exporter.name);
+    }
+    this.runners = exporters.map(
+      (exporter) =>
+        new ExporterRunner(exporter, {
+          maxPending: this.config.maxPendingWindows,
+          maxRetries: this.config.maxRetries,
+          debug: (message) => this.log("debug", message),
+        })
+    );
   }
 
-  /**
-   * Start continuous profiling. No-op if already running.
-   */
+  static fromEnv(overrides: Partial<BunPyroscopeOptions> = {}): BunPyroscope {
+    return new BunPyroscope(optionsFromEnv(overrides));
+  }
+
   async start(): Promise<void> {
+    await this.stopPromise;
     if (this.running) {
       this.log("warn", "start() called but profiler is already running");
       return;
     }
+    if (registry[ACTIVE_PROFILER] && registry[ACTIVE_PROFILER] !== this) {
+      throw new ProfilerConcurrencyError(
+        "another profiler is already active in this isolate; Bun currently supports only one inspector CPU sampler per process"
+      );
+    }
+    registry[ACTIVE_PROFILER] = this;
 
     try {
       const mod = await import("node:inspector/promises");
       if (!mod.Session) throw new Error("Session export missing");
       this.session = new mod.Session();
       this.session.connect();
-    } catch {
-      this.session = null;
+      await this.session.post("Profiler.enable");
+      await this.session.post("Profiler.setSamplingInterval", {
+        interval: this.currentSampleIntervalUs,
+      });
+    } catch (error) {
+      this.cleanupFailedStart();
+      if (String(error).includes("Profiler")) {
+        throw new Error(`[bun-profiler] Failed to initialize profiler session: ${error}`);
+      }
       throw new Error(
         "[bun-profiler] node:inspector/promises is not available in this runtime. " +
           "CPU profiling requires Node.js or a Bun version with inspector support."
       );
-    }
-
-    try {
-      await this.session.post("Profiler.enable");
-      await this.session.post("Profiler.setSamplingInterval", {
-        interval: this.config.sampleIntervalUs,
-      });
-    } catch (err) {
-      this.session.disconnect();
-      this.session = null;
-      throw new Error(`[bun-profiler] Failed to initialize profiler session: ${err}`);
     }
 
     if (this.config.heap.enabled) {
@@ -158,443 +139,376 @@ export class BunPyroscope {
         await this.session.post("HeapProfiler.startSampling", {
           samplingInterval: this.config.heap.samplingIntervalBytes,
         });
-      } catch (err) {
-        this.log("warn", `HeapProfiler init failed (heap profiling disabled): ${err}`);
+      } catch (error) {
+        this.log("warn", `HeapProfiler init failed (heap profiling disabled): ${error}`);
         this.config.heap.enabled = false;
       }
     }
 
+    await this.detectJscHeapStats();
     this.running = true;
     this.installSignalHandlers();
-    await this.beginWindow();
+    try {
+      await this.beginWindow();
+      this.scheduleNextWindow();
+    } catch (error) {
+      this.running = false;
+      this.removeSignalHandlers();
+      this.cleanupFailedStart();
+      throw error;
+    }
   }
 
-  /**
-   * Stop profiling. Flushes the current window before disconnecting. Idempotent.
-   */
-  async stop(): Promise<void> {
-    if (!this.running) return;
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    this.stopPromise = this.stopInternal().finally(() => {
+      this.stopPromise = null;
+    });
+    return this.stopPromise;
+  }
+
+  private async stopInternal(): Promise<void> {
+    if (!this.running && !this.profileActive) return;
     this.running = false;
-
-    if (this.pushTimer !== null) {
-      clearTimeout(this.pushTimer);
-      this.pushTimer = null;
-    }
-
-    // A timer callback that already fired can't be cancelled. Let it finish so
-    // we don't issue a second concurrent Profiler.stop, and so the window it is
-    // pushing is registered before we snapshot the in-flight set below.
+    this.clearTimer();
     await this.activeCycle?.catch(() => undefined);
 
-    await this.endWindowAndPush().catch((err) => {
-      this.log("warn", `Final flush failed: ${err}`);
-    });
-
-    // Pushes registered while awaiting can add more entries, so drain until
-    // empty rather than awaiting a single snapshot — otherwise the final
-    // window is dropped on the floor, which is the whole point of stop().
-    while (this.inFlightPushes.size > 0) {
-      await Promise.allSettled([...this.inFlightPushes]);
+    if (this.profileActive) {
+      await this.captureWindow(false).catch((error) => {
+        this.log("warn", `Final capture failed: ${error}`);
+      });
     }
 
+    await this.drainExporters();
     this.removeSignalHandlers();
-
     if (this.session) {
       if (this.config.heap.enabled) {
-        try {
-          await this.session.post("HeapProfiler.disable");
-        } catch {
-          // Ignore — already stopping
-        }
+        await this.session.post("HeapProfiler.disable").catch(() => undefined);
       }
       try {
         this.session.disconnect();
       } catch {
-        // Ignore disconnect errors during shutdown
+        // Already disconnected.
       }
       this.session = null;
     }
+    if (registry[ACTIVE_PROFILER] === this) delete registry[ACTIVE_PROFILER];
   }
 
-  private async beginWindow(schedule = true): Promise<void> {
-    if (!this.session || !this.running) return;
-
-    this.windowStart = Math.floor(Date.now() / 1000);
-
+  private cleanupFailedStart(): void {
     try {
-      await this.session.post("Profiler.start");
-    } catch (err) {
-      this.log("error", `Profiler.start failed: ${err}`);
-      if (schedule) this.scheduleNextWindow();
-      return;
+      this.session?.disconnect();
+    } catch {
+      // Ignore cleanup failures.
     }
+    this.session = null;
+    this.profileActive = false;
+    if (registry[ACTIVE_PROFILER] === this) delete registry[ACTIVE_PROFILER];
+  }
 
-    if (schedule) this.scheduleNextWindow();
+  private async beginWindow(): Promise<void> {
+    if (!this.session || !this.running) return;
+    this.windowStart = Math.floor(Date.now() / 1_000);
+    this.windowLabels = Object.freeze({ ...this.config.labels });
+    await this.session.post("Profiler.start");
+    this.profileActive = true;
   }
 
   private scheduleNextWindow(): void {
-    if (!this.running) return;
+    if (!this.running || this.pushTimer) return;
     this.pushTimer = setTimeout(() => {
-      // Mark the timer as spent — it has fired and can no longer be cleared.
       this.pushTimer = null;
-
-      // This promise deliberately never rejects. Any escaping error would
-      // leave the profiler stopped with no window ever scheduled again, and
-      // would surface only as an unhandled rejection.
-      const cycle = (async () => {
-        try {
-          await this.endWindowAndPush();
-        } catch (err) {
-          // e.g. converting a malformed profile.
-          this.log("error", `Push cycle failed: ${err}`);
+      const cycle = this.captureWindow(true).catch((error) => {
+        this.log("error", `Capture cycle failed: ${error}`);
+        if (this.running && !this.profileActive) {
+          void this.beginWindow()
+            .then(() => this.scheduleNextWindow())
+            .catch((startError) => this.log("error", `Failed to recover profiler: ${startError}`));
         }
-
-        if (!this.running) return;
-
-        try {
-          await this.beginWindow();
-        } catch (err) {
-          this.log("error", `Failed to restart profiling window: ${err}`);
-        }
-      })();
-
+      });
       this.activeCycle = cycle;
-      void cycle.then(() => {
+      void cycle.finally(() => {
         if (this.activeCycle === cycle) this.activeCycle = null;
+        // Conversion is deliberately after restart, but a conversion failure
+        // must not silently kill future rotations while sampling continues.
+        if (this.running && this.profileActive) this.scheduleNextWindow();
       });
     }, this.config.pushIntervalMs);
+    // Profiling must not keep a short-lived CLI/script alive by itself. The
+    // preload entry point uses beforeExit to flush the final partial window.
+    this.pushTimer.unref?.();
   }
 
-  private async endWindowAndPush(): Promise<void> {
-    if (!this.session) return;
+  private clearTimer(): void {
+    if (this.pushTimer) clearTimeout(this.pushTimer);
+    this.pushTimer = null;
+  }
 
-    // Pyroscope's ingest range is in whole seconds. tag() ends a window as soon
-    // as its callback returns, and pushIntervalMs may be sub-second, so without
-    // this clamp a fast region yields from === until — a zero-length range that
-    // the server stores as an invisible instant.
-    const windowEnd = Math.max(Math.floor(Date.now() / 1000), this.windowStart + 1);
-
+  /** Stop, immediately restart, and only then convert/export the completed profile. */
+  private async captureWindow(restart: boolean): Promise<void> {
+    if (!this.session || !this.profileActive) return;
+    const session = this.session;
+    const from = this.windowStart;
+    const labels = this.windowLabels;
+    const sampleIntervalUs = this.currentSampleIntervalUs;
+    const until = Math.max(Math.floor(Date.now() / 1_000), from + 1);
+    const gapStarted = performance.now();
     let profile: CdpProfile;
     try {
-      const result = (await this.session.post("Profiler.stop")) as { profile: CdpProfile };
+      const result = (await session.post("Profiler.stop")) as { profile: CdpProfile };
       profile = result.profile;
-    } catch (err) {
-      this.log("error", `Profiler.stop failed: ${err}`);
-      return;
+      this.profileActive = false;
+    } catch (error) {
+      this.captureFailures++;
+      throw error;
     }
 
-    // Capture windowStart locally so async catch handlers log the correct value
-    // (this.windowStart may be updated by beginWindow() before the push completes)
-    const windowStart = this.windowStart;
+    // This ordering is the core blind-spot fix. No conversion or network work
+    // happens until a new sampling window is active.
+    if (restart && this.running) {
+      await this.adjustSamplingInterval(profile, session);
+      await this.beginWindow();
+      const gapMs = performance.now() - gapStarted;
+      this.lastCaptureGapMs = gapMs;
+      this.maxCaptureGapMs = Math.max(this.maxCaptureGapMs, gapMs);
+    }
 
-    const folded = convertToFolded(profile);
-    if (!folded) {
-      // Counted, not pushed: normal for an idle process, but a run of these
-      // while the service is busy means the profiler isn't seeing the work.
-      this.emptyWindows++;
-      this.log("debug", `Empty profile for window [${windowStart}-${windowEnd}], skipping`);
-    } else {
-      const sampleRate = calculateSampleRate(profile);
-      // Push is non-blocking so the profiling loop can start the next window immediately,
-      // but we track the promise so stop() can await delivery before disconnecting.
-      this.trackPush(
-        this.pushWithRetry(folded, windowStart, windowEnd, sampleRate).catch((err) => {
-          this.log("error", `All retries exhausted for [${windowStart}-${windowEnd}]: ${err}`);
-        })
+    let heapProfile: SamplingHeapProfile | undefined;
+    if (this.config.heap.enabled) {
+      try {
+        const heapResult = (await session.post("HeapProfiler.stopSampling")) as {
+          profile: SamplingHeapProfile;
+        };
+        heapProfile = heapResult.profile;
+        if (this.running || restart) {
+          await session.post("HeapProfiler.startSampling", {
+            samplingInterval: this.config.heap.samplingIntervalBytes,
+          });
+        }
+      } catch (error) {
+        this.log("warn", `Heap profile rotation failed: ${error}`);
+      }
+    }
+
+    await this.processCaptured({ profile, heapProfile, from, until, labels, sampleIntervalUs });
+    if (restart && this.running) this.scheduleNextWindow();
+  }
+
+  private async processCaptured(captured: CapturedWindow): Promise<void> {
+    const conversionStarted = performance.now();
+    const profile = this.sourceMapResolver
+      ? await this.sourceMapResolver.resolveProfile(captured.profile)
+      : captured.profile;
+    this.capturedWindows++;
+    this.capturedSamples += profile.samples?.length ?? 0;
+
+    const cpuFolded = convertToFolded(profile);
+    if (cpuFolded) {
+      this.enqueueWindow(
+        this.makeWindow("cpu", cpuFolded, calculateSampleRate(profile), profile, captured)
       );
+    } else {
+      this.emptyWindows++;
     }
 
     if (this.config.wallTime.enabled) {
-      const wallFolded = convertToFoldedWallTime(profile, this.config.sampleIntervalUs);
-      if (!wallFolded) {
-        this.log(
-          "debug",
-          `Empty wall-time profile for window [${windowStart}-${windowEnd}], skipping`
-        );
-      } else {
-        this.trackPush(
-          this.pushWithRetry(wallFolded, windowStart, windowEnd, 1_000_000, "wall").catch((err) => {
-            this.log("error", `Wall-time push failed for [${windowStart}-${windowEnd}]: ${err}`);
-          })
-        );
+      const wallFolded = convertToFoldedWallTime(profile, captured.sampleIntervalUs);
+      if (wallFolded) {
+        this.enqueueWindow(this.makeWindow("wall", wallFolded, 1_000_000, profile, captured));
       }
     }
 
-    if (this.config.heap.enabled) {
-      this.trackPush(
-        this.flushHeapWindow(windowStart, windowEnd).catch((err) => {
-          this.log("error", `Heap flush failed for [${windowStart}-${windowEnd}]: ${err}`);
-        })
-      );
+    if (captured.heapProfile) {
+      const heapFolded = convertHeapToFolded(captured.heapProfile);
+      if (heapFolded) {
+        this.enqueueWindow(
+          this.makeWindow("alloc_space", heapFolded, 1, captured.heapProfile, captured)
+        );
+      }
     }
+    this.lastConversionDurationMs = performance.now() - conversionStarted;
   }
 
-  private trackPush(p: Promise<void>): void {
-    this.inFlightPushes.add(p);
-    p.finally(() => this.inFlightPushes.delete(p));
-  }
-
-  private async flushHeapWindow(windowStart: number, windowEnd: number): Promise<void> {
-    if (!this.session) return;
-
-    let heapProfile: SamplingHeapProfile;
-    try {
-      const result = (await this.session.post("HeapProfiler.stopSampling")) as {
-        profile: SamplingHeapProfile;
-      };
-      heapProfile = result.profile;
-    } catch (err) {
-      this.log("warn", `HeapProfiler.stopSampling failed: ${err}`);
-      return;
-    }
-
-    try {
-      await this.session.post("HeapProfiler.startSampling", {
-        samplingInterval: this.config.heap.samplingIntervalBytes,
-      });
-    } catch (err) {
-      this.log("warn", `HeapProfiler.startSampling (restart) failed: ${err}`);
-    }
-
-    const folded = convertHeapToFolded(heapProfile);
-    if (!folded) {
-      this.log("debug", `Empty heap profile for window [${windowStart}-${windowEnd}], skipping`);
-      return;
-    }
-
-    await this.pushWithRetry(folded, windowStart, windowEnd, 1, "alloc_space").catch((err) => {
-      this.log("error", `Heap push failed for [${windowStart}-${windowEnd}]: ${err}`);
-    });
-  }
-
-  private buildIngestUrl(from: number, until: number, sampleRate: number, type = "cpu"): string {
-    const name = encodePyroscopeName(this.config.appName, this.config.labels, type);
-    const params = new URLSearchParams({
-      name,
-      from: String(from),
-      until: String(until),
-      sampleRate: String(sampleRate),
-      spyName: "nodespy",
-      format: "folded",
-    });
-    return `${this.config.pyroscopeUrl}/ingest?${params.toString()}`;
-  }
-
-  private buildAuthHeader(): string | undefined {
-    if (this.config.authToken) return `Bearer ${this.config.authToken}`;
-    if (this.config.basicAuth) {
-      const { username, password } = this.config.basicAuth;
-      const encoded = Buffer.from(`${username}:${password}`).toString("base64");
-      return `Basic ${encoded}`;
-    }
-    return undefined;
-  }
-
-  private async pushWithRetry(
+  private makeWindow(
+    type: ProfileWindow["type"],
     folded: string,
-    from: number,
-    until: number,
     sampleRate: number,
-    type = "cpu"
-  ): Promise<void> {
-    const url = this.buildIngestUrl(from, until, sampleRate, type);
-    const authHeader = this.buildAuthHeader();
+    profile: ProfileWindow["profile"],
+    captured: CapturedWindow
+  ): ProfileWindow {
+    return Object.freeze({
+      type,
+      appName: this.config.appName,
+      labels: captured.labels,
+      from: captured.from,
+      until: captured.until,
+      sampleRate,
+      sampleIntervalUs: captured.sampleIntervalUs,
+      folded,
+      profile,
+    });
+  }
 
-    let body: Uint8Array | string;
-    const headers: Record<string, string> = {
-      "Content-Type": "text/plain",
+  private enqueueWindow(window: ProfileWindow): void {
+    for (const runner of this.runners) runner.enqueue(window);
+  }
+
+  private async drainExporters(): Promise<void> {
+    const finish = async () => {
+      await Promise.all(this.runners.map((runner) => runner.waitForIdle()));
+      await Promise.allSettled(this.runners.map((runner) => runner.shutdown()));
     };
-
-    if (this.config.compress) {
-      const gzipped = await gzipAsync(Buffer.from(folded, "utf8"));
-      // Use Uint8Array instead of Buffer for reliable binary handling in Bun's fetch
-      body = toUint8Array(gzipped);
-      headers["Content-Encoding"] = "gzip";
-      // Content-Length is deliberately not set — it's a forbidden request
-      // header, so fetch derives it from the body. Setting it risks a
-      // duplicate/conflicting header that strict proxies answer with a 400.
-    } else {
-      body = folded;
-    }
-
-    if (authHeader) headers.Authorization = authHeader;
-
-    let lastError: Error | null = null;
-
-    for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
-      if (attempt > 0) {
-        const delayMs = Math.min(1000 * 2 ** (attempt - 1), 30_000);
-        this.log("debug", `Retry ${attempt}/${this.config.maxRetries} after ${delayMs}ms`);
-        await sleep(delayMs);
-      }
-
-      try {
-        const response = await fetch(url, { method: "POST", headers, body });
-
-        if (response.ok) {
-          // Drain the body so the connection can be reused rather than held
-          // open — this runs thousands of times over a process's lifetime.
-          await response.arrayBuffer().catch(() => undefined);
-          const lines = folded.split("\n").length;
-          this.pushedWindows++;
-          this.lastPushAt = Date.now();
-          this.log("debug", `Pushed ${lines} stacks [${from}-${until}] HTTP ${response.status}`);
-          return;
-        }
-
-        const text = await response.text().catch(() => "(unreadable)");
-        const err = new PushError(response.status, text);
-
-        // Most 4xx are client errors that retrying won't fix, but 429 (ingest
-        // rate limit — Grafana Cloud returns this) and 408 are explicitly
-        // retryable. Treating them as fatal drops every window for the whole
-        // duration of a rate limit.
-        if (!err.retryable) {
-          this.recordFailure(err);
-          throw err;
-        }
-
-        lastError = err;
-        this.log("warn", `Push failed (attempt ${attempt + 1}): ${err.message}`);
-      } catch (fetchErr) {
-        // Non-retryable HTTP status — propagate rather than burning retries.
-        if (fetchErr instanceof PushError && !fetchErr.retryable) {
-          this.recordFailure(fetchErr);
-          throw fetchErr;
-        }
-        lastError = fetchErr instanceof Error ? fetchErr : new Error(String(fetchErr));
-        this.log("warn", `Push error (attempt ${attempt + 1}): ${lastError.message}`);
-      }
-    }
-
-    if (lastError) {
-      this.recordFailure(lastError);
-      throw lastError;
+    const draining = finish();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const completed = await Promise.race([
+      draining.then(() => true),
+      new Promise<false>((resolve) => {
+        timeout = setTimeout(() => resolve(false), this.config.shutdownTimeoutMs);
+      }),
+    ]);
+    if (timeout) clearTimeout(timeout);
+    if (!completed) {
+      for (const runner of this.runners) runner.abortAndDrop();
+      // An exporter is allowed to ignore AbortSignal. Do not await it after the
+      // configured deadline or process shutdown could hang forever.
+      void draining.catch(() => undefined);
     }
   }
 
-  private recordFailure(err: Error): void {
-    this.failedWindows++;
-    this.lastError = err.message;
-  }
-
-  /**
-   * A snapshot of what the profiler has actually delivered.
-   *
-   * Continuous profiling fails quietly: a broken push loop looks exactly like an
-   * idle process. Surface this from a health endpoint so the difference is
-   * visible.
-   *
-   * @example
-   * const s = profiler.stats();
-   * // Note "nothing pushed lately" is NOT a fault: an idle process produces no
-   * // samples, so windows are legitimately empty. A dead loop, or pushes that
-   * // have only ever failed, are unambiguous.
-   * const degraded = !s.running || (s.pushedWindows === 0 && s.failedWindows > 0);
-   * return Response.json(s, { status: degraded ? 503 : 200 });
-   */
   stats(): ProfilerStats {
+    const exporterStats = Object.fromEntries(
+      this.runners.map((runner) => [runner.exporter.name, runner.stats()])
+    );
+    const all = Object.values(exporterStats);
+    const pushedWindows = all.reduce((sum, item) => sum + item.exportedProfiles, 0);
+    const failedWindows = all.reduce((sum, item) => sum + item.failedProfiles, 0);
+    const lastPushAt = all.reduce<number | null>(
+      (latest, item) =>
+        item.lastSuccessAt !== null && (latest === null || item.lastSuccessAt > latest)
+          ? item.lastSuccessAt
+          : latest,
+      null
+    );
+    const lastError = [...all].reverse().find((item) => item.lastError !== null)?.lastError ?? null;
     const streams = ["cpu"];
     if (this.config.wallTime.enabled) streams.push("wall");
     if (this.config.heap.enabled) streams.push("alloc_space");
-
     return {
       running: this.running,
-      pushedWindows: this.pushedWindows,
-      failedWindows: this.failedWindows,
+      pushedWindows,
+      failedWindows,
       emptyWindows: this.emptyWindows,
-      lastPushAt: this.lastPushAt,
-      lastError: this.lastError,
+      lastPushAt,
+      lastError,
       streams,
+      capturedWindows: this.capturedWindows,
+      capturedSamples: this.capturedSamples,
+      captureFailures: this.captureFailures,
+      lastCaptureGapMs: this.lastCaptureGapMs,
+      maxCaptureGapMs: this.maxCaptureGapMs,
+      lastConversionDurationMs: this.lastConversionDurationMs,
+      currentSampleIntervalUs: this.currentSampleIntervalUs,
+      samplingIntervalChanges: this.samplingIntervalChanges,
+      exporters: exporterStats,
+      memory: this.memoryStats(),
     };
   }
 
-  /**
-   * Run `fn` with extra labels applied to the profile window.
-   *
-   * Splits the current profiling window at entry and exit so the tagged code
-   * gets its own labeled profile stream in Pyroscope.
-   *
-   * Note: concurrent `tag()` calls on the same profiler instance are not safe.
-   * For concurrent workloads, create separate BunPyroscope instances.
-   */
+  private async adjustSamplingInterval(profile: CdpProfile, session: Session): Promise<void> {
+    if (!this.config.adaptiveSampling.enabled) return;
+    const durationUs = Math.max(1, profile.endTime - profile.startTime);
+    const expectedSamples = durationUs / this.currentSampleIntervalUs;
+    const utilization = (profile.samples?.length ?? 0) / Math.max(1, expectedSamples);
+    const next =
+      utilization >= this.config.adaptiveSampling.busyThreshold
+        ? this.config.adaptiveSampling.busyIntervalUs
+        : this.config.adaptiveSampling.idleIntervalUs;
+    if (next === this.currentSampleIntervalUs) return;
+    await session.post("Profiler.setSamplingInterval", { interval: next });
+    this.currentSampleIntervalUs = next;
+    this.samplingIntervalChanges++;
+  }
+
   async tag<T>(extraLabels: Record<string, string>, fn: () => T | Promise<T>): Promise<Awaited<T>> {
     if (!this.running || !this.session) return (await fn()) as Awaited<T>;
-
-    // 1. Cancel scheduled push
-    if (this.pushTimer !== null) {
-      clearTimeout(this.pushTimer);
-      this.pushTimer = null;
+    if (this.tagActive) {
+      throw new ProfilerConcurrencyError(
+        "overlapping tag() calls cannot be attributed safely on a process-wide sampler"
+      );
     }
-
-    // 2. Flush current window with existing labels
-    await this.endWindowAndPush();
-
-    // 3. Override labels
+    this.tagActive = true;
+    this.clearTimer();
+    await this.activeCycle?.catch(() => undefined);
     const savedLabels = this.config.labels;
     this.config.labels = { ...savedLabels, ...extraLabels };
-
-    // 4. Start tagged window without auto-scheduling
-    await this.beginWindow(false);
-
     try {
+      // captureWindow snapshots the old window labels, then beginWindow reads
+      // the newly installed tag labels before conversion starts.
+      await this.captureWindow(true);
       return (await fn()) as Awaited<T>;
     } finally {
-      // 5. Cancel any timer that fired during fn(), and let an already-running
-      //    cycle finish so it can't interleave with the flush below.
-      if (this.pushTimer !== null) {
-        clearTimeout(this.pushTimer);
-        this.pushTimer = null;
-      }
-      await this.activeCycle?.catch(() => undefined);
-
-      // 6. Flush the tagged window. If this throws, the labels must still be
-      //    restored — otherwise every later window is misattributed to this
-      //    tag and profiling never resumes.
-      try {
-        await this.endWindowAndPush();
-      } catch (err) {
-        this.log("error", `Tagged window flush failed: ${err}`);
-      }
-
-      // 7. Restore labels + resume normal profiling
+      this.clearTimer();
       this.config.labels = savedLabels;
-      if (this.running) await this.beginWindow();
+      try {
+        await this.captureWindow(true);
+      } catch (error) {
+        this.log("error", `Tagged window capture failed: ${error}`);
+      }
+      this.tagActive = false;
+      if (this.running && !this.profileActive) {
+        await this.beginWindow();
+      }
+      this.scheduleNextWindow();
     }
   }
 
-  /**
-   * Install SIGTERM/SIGINT handlers to flush the final profile on shutdown.
-   * After flush, re-emits the signal so the process exits normally.
-   */
-  private installSignalHandlers(): void {
-    if (this.signalHandlers) return;
-
-    const shutdown = async (signal: NodeJS.Signals) => {
-      this.log("debug", `Received ${signal}, flushing final profile...`);
-      // stop() removes the handlers, so the re-raise below doesn't re-enter.
-      await this.stop().catch((err) => {
-        this.log("error", `Error during ${signal} shutdown: ${err}`);
-      });
-      process.kill(process.pid, signal);
+  private memoryStats(): ProfilerMemoryStats {
+    const memory = process.memoryUsage();
+    const result: ProfilerMemoryStats = {
+      rssBytes: memory.rss,
+      heapUsedBytes: memory.heapUsed,
+      heapTotalBytes: memory.heapTotal,
+      externalBytes: memory.external,
     };
-
-    const sigtermHandler = () => void shutdown("SIGTERM");
-    const sigintHandler = () => void shutdown("SIGINT");
-
-    this.signalHandlers = { sigterm: sigtermHandler, sigint: sigintHandler };
-
-    process.on("SIGTERM", sigtermHandler);
-    process.on("SIGINT", sigintHandler);
+    try {
+      const jsc = this.jscHeapStats?.();
+      if (jsc) {
+        if (typeof jsc.heapSize === "number") result.jscHeapSizeBytes = jsc.heapSize;
+        if (typeof jsc.heapCapacity === "number") result.jscHeapCapacityBytes = jsc.heapCapacity;
+        if (typeof jsc.extraMemorySize === "number")
+          result.jscExtraMemorySizeBytes = jsc.extraMemorySize;
+      }
+    } catch {
+      // Memory metrics must never affect profiling.
+    }
+    return result;
   }
 
-  /**
-   * Detach the shutdown handlers.
-   *
-   * Without this, every start()/stop() pair leaks two process listeners —
-   * enough instances triggers MaxListenersExceededWarning and makes each stale
-   * handler re-raise the signal on shutdown.
-   */
+  private async detectJscHeapStats(): Promise<void> {
+    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") return;
+    try {
+      const specifier = "bun:jsc";
+      const mod = (await import(specifier)) as { heapStats?: () => Record<string, number> };
+      if (mod.heapStats) this.jscHeapStats = mod.heapStats;
+    } catch {
+      // Node and older Bun versions do not provide this module.
+    }
+  }
+
+  private installSignalHandlers(): void {
+    if (this.signalHandlers) return;
+    const shutdown = async (signal: NodeJS.Signals) => {
+      this.log("debug", `Received ${signal}, flushing final profile...`);
+      await this.stop().catch((error) => this.log("error", `Error during shutdown: ${error}`));
+      process.kill(process.pid, signal);
+    };
+    const sigterm = () => void shutdown("SIGTERM");
+    const sigint = () => void shutdown("SIGINT");
+    this.signalHandlers = { sigterm, sigint };
+    process.on("SIGTERM", sigterm);
+    process.on("SIGINT", sigint);
+  }
+
   private removeSignalHandlers(): void {
     if (!this.signalHandlers) return;
     process.removeListener("SIGTERM", this.signalHandlers.sigterm);
@@ -602,15 +516,11 @@ export class BunPyroscope {
     this.signalHandlers = null;
   }
 
-  private log(level: "debug" | "warn" | "error", msg: string): void {
+  private log(level: "debug" | "warn" | "error", message: string): void {
     if (level === "debug" && !this.config.debug) return;
-    const formatted = `[bun-profiler] [${level.toUpperCase()}] ${msg}`;
+    const formatted = `[bun-profiler] [${level.toUpperCase()}] ${message}`;
     if (level === "error") console.error(formatted);
     else if (level === "warn") console.warn(formatted);
     else console.log(formatted);
   }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

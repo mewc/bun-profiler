@@ -6,7 +6,8 @@
  * "/" so you can drive them from a browser.
  */
 
-import { BunPyroscope } from "../../src/index.ts";
+import { BunPyroscope, renderPrometheusMetrics } from "../../src/index.ts";
+import { otlpHttpProfilesExporter } from "../../src/experimental.ts";
 import { recordRequest, renderMetrics } from "./metrics.ts";
 import { renderPanel } from "./panel.ts";
 import { echo, WORKLOADS } from "./workloads/index.ts";
@@ -15,6 +16,8 @@ const PYROSCOPE_URL = process.env.PYROSCOPE_URL ?? "http://pyroscope:4040";
 const APP_NAME = process.env.SERVICE_NAME ?? "bun-profiler-demo";
 const PORT = Number(process.env.PORT ?? 3000);
 const PUSH_INTERVAL_MS = Number(process.env.PUSH_INTERVAL_MS ?? 5_000);
+const PYROSCOPE_FORMAT = process.env.PYROSCOPE_FORMAT === "pprof" ? "pprof" : "folded";
+const OTLP_PROFILES_URL = process.env.OTLP_PROFILES_URL;
 
 // Published ports differ per checkout (Conductor gives each workspace its own
 // range), so compose passes the host-side URLs in rather than the panel
@@ -26,16 +29,22 @@ const PANEL_LINKS = {
 };
 
 const profiler = new BunPyroscope({
-  pyroscopeUrl: PYROSCOPE_URL,
+  pyroscopeUrl: OTLP_PROFILES_URL ? undefined : PYROSCOPE_URL,
+  exporters: OTLP_PROFILES_URL
+    ? [otlpHttpProfilesExporter({ url: OTLP_PROFILES_URL })]
+    : undefined,
   appName: APP_NAME,
   pushIntervalMs: PUSH_INTERVAL_MS,
   debug: true,
+  pyroscopeFormat: PYROSCOPE_FORMAT,
   wallTime: { enabled: true },
   labels: { demo: "true" },
 });
 
 await profiler.start();
-console.log(`[demo] profiler → ${PYROSCOPE_URL} as "${APP_NAME}" every ${PUSH_INTERVAL_MS}ms`);
+console.log(
+  `[demo] profiler → ${OTLP_PROFILES_URL ?? PYROSCOPE_URL} as "${APP_NAME}" every ${PUSH_INTERVAL_MS}ms`
+);
 
 /** Wrap a handler with timing + Prometheus accounting. */
 async function handle(
@@ -62,7 +71,7 @@ const routes: Record<string, (req: Request) => Promise<Response> | Response> = {
     }),
 
   "/metrics": () =>
-    new Response(renderMetrics(), {
+    new Response(`${renderMetrics()}${renderPrometheusMetrics(profiler)}`, {
       headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
     }),
 

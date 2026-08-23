@@ -33,19 +33,32 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs",
       "types": "./dist/index.d.ts"
+    },
+    "./preload": {
+      "import": "./dist/preload.js",
+      "types": "./dist/preload.d.ts"
+    },
+    "./experimental": {
+      "import": "./dist/experimental.js",
+      "types": "./dist/experimental.d.ts"
     }
+  },
+  "bin": {
+    "bun-profiler": "./dist/cli.js"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
+    "docs",
+    "examples",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "bun run build:esm && bun run build:cjs && bun run build:types",
-    "build:esm": "bun build ./src/index.ts --outfile ./dist/index.js --format esm --target node --external node:inspector --external node:os --external node:zlib --external node:util",
+    "build:esm": "bun build ./src/index.ts ./src/preload.ts ./src/cli.ts ./src/experimental.ts --outdir ./dist --format esm --target node --external node:inspector --external node:os --external node:zlib --external node:util --external node:fs/promises --external node:child_process --external node:url --external node:worker_threads",
     "build:cjs": "bun build ./src/index.ts --outfile ./dist/index.cjs --format cjs --target node --external node:inspector --external node:os --external node:zlib --external node:util",
     "build:types": "tsc --emitDeclarationOnly --declaration --declarationMap --outDir dist",
     "test": "bun test",
@@ -61,6 +74,11 @@
     "dev:load": "dev/loadgen.sh",
     "dev:reset": "dev/down.sh && dev/up.sh",
     "screenshots": "dev/screenshots.sh",
+    "dev:alloy": "dev/up.sh --alloy",
+    "dev:failures": "dev/failures.sh",
+    "dev:workers": "dev/workers.sh",
+    "dev:otlp": "dev/up.sh --otlp",
+    "bench": "dev/bench.sh",
     "smoke": "bun smoke-test.ts",
     "release:patch": "npm version patch && git push --follow-tags",
     "release:minor": "npm version minor && git push --follow-tags",
@@ -72,6 +90,10 @@
     "@types/node": "^25.3.0",
     "playwright": "^1.62.0",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@jridgewell/trace-mapping": "^0.3.31",
+    "protobufjs": "^7.6.5"
   },
   "engines": {
     "bun": ">=1.3.7"

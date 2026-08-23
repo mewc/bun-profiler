@@ -28,6 +28,11 @@ published — don't hardcode them, see [Ports](#ports) below.
 | `bun run dev:reset`   | Wipe all profile data and rebuild from scratch      |
 | `bun run dev:down`    | Stop this workspace's stack and delete its volumes  |
 | `bun run screenshots` | Regenerate the README images from the running stack |
+| `bun run dev:alloy`    | Route the app through Alloy and fan out to two Pyroscopes |
+| `bun run dev:failures` | Inject 500, Retry-After 429, 400, 12s latency, and recovery while capturing |
+| `bun run dev:workers`  | Profile one selected worker alongside an unprofiled worker |
+| `bun run dev:otlp`     | Send Alpha OTLP Profiles JSON to a Collector debug exporter |
+| `bun run bench`        | Compare unprofiled, CPU, CPU+wall, pprof, and worker cases |
 
 ## The control panel
 
@@ -53,6 +58,10 @@ flamegraph and stop being separable.
 | Grafana    | <http://localhost:3003/d/bun-profiler-demo> | Provisioned dashboard, no login |
 | Pyroscope  | <http://localhost:4042>                     | Raw profile storage & UI        |
 | Prometheus | <http://localhost:9091>                     | Scrapes the app's `/metrics`    |
+| Alloy      | <http://localhost:12346>                    | Receiver/debug UI in Alloy lab  |
+| Fault receiver | <http://localhost:4043>                | Controllable ingestion proxy    |
+| OTLP Collector | <http://localhost:4318>                | Experimental Profiles receiver  |
+| Worker fixture | <http://localhost:3004>                | Selected-isolate worker lab     |
 
 ## Ports
 
@@ -66,6 +75,11 @@ Compose project name (`bun-profiler-<workspace>`):
 | Grafana    | `CONDUCTOR_PORT`+1  |
 | Pyroscope  | `CONDUCTOR_PORT`+2  |
 | Prometheus | `CONDUCTOR_PORT`+3  |
+| Alloy      | `CONDUCTOR_PORT`+4  |
+| Fault receiver | `CONDUCTOR_PORT`+5 |
+| OTLP Collector | `CONDUCTOR_PORT`+6 |
+| Worker fixture | `CONDUCTOR_PORT`+7 |
+| Reserved fixtures | `CONDUCTOR_PORT`+8 through +9 |
 
 Both are needed for parallel workspaces. Without per-workspace ports the second
 workspace fails to bind; without a per-workspace project name Compose would name
@@ -76,7 +90,19 @@ another workspace's containers and `down` would delete them.
 `dev/up.sh`, `dev/down.sh`, `dev/loadgen.sh` and `dev/compose.sh` always agree on
 which stack they are talking to. Override any of `APP_PORT`, `GRAFANA_PORT`,
 `PYROSCOPE_PORT`, `PROMETHEUS_PORT` or `COMPOSE_PROJECT_NAME` to pin them
-yourself.
+yourself. `dev/up.sh` preflights the full reserved block before starting.
+
+## Acceptance labs
+
+`dev:alloy` changes the app target to Alloy's `pyroscope.receive_http` endpoint. Alloy forwards each profile to the visible primary Pyroscope and an internal secondary Pyroscope, which exercises receiver compatibility and destination fan-out.
+
+`dev:failures` puts a controllable Bun proxy in front of Pyroscope. It drives traffic through 500, a 429 with `Retry-After`, a malformed-request 400, a 12-second response delay, and recovery, then prints queue, retry, failure, drop, and last-success metrics. Capture continues during every phase.
+
+The health dashboard at `/d/bun-profiler-health` adds capture-gap, exporter throughput/failure, backpressure/drop, and last-success panels. The existing screenshot command remains the visual acceptance path.
+
+`dev:workers` intentionally profiles only one selected worker. Bun 1.3.x exposes one process-wide inspector CPU sampler; two worker preloads race and produce invalid/truncated captures. The second worker stays active but unprofiled so this fixture continuously checks the supported topology without pretending each isolate can own a sampler.
+
+`dev:otlp` is a protocol-development fixture, not a stable deployment example. Collector output is available with `dev/compose.sh --profile otlp logs -f otel-collector`.
 
 Run an arbitrary Compose command against this workspace's stack with
 `dev/compose.sh`, e.g. `dev/compose.sh ps`.

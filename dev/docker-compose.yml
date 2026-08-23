@@ -20,6 +20,9 @@ services:
       - PUBLIC_GRAFANA_URL=http://localhost:${GRAFANA_PORT:-3003}
       - PUBLIC_PYROSCOPE_URL=http://localhost:${PYROSCOPE_PORT:-4042}
       - PUBLIC_PROMETHEUS_URL=http://localhost:${PROMETHEUS_PORT:-9091}
+      - PYROSCOPE_URL=${PYROSCOPE_TARGET_URL:-http://pyroscope:4040}
+      - PYROSCOPE_FORMAT=${PYROSCOPE_FORMAT:-folded}
+      - OTLP_PROFILES_URL=${OTLP_PROFILES_URL:-}
     volumes:
       - ..:/app
       - /app/node_modules # anonymous volume so container's node_modules isn't overwritten
@@ -90,3 +93,52 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  alloy:
+    image: grafana/alloy:latest
+    profiles: ["alloy"]
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+    ports:
+      - "${ALLOY_PORT:-12346}:12345"
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+    depends_on:
+      - pyroscope
+      - pyroscope-secondary
+    restart: unless-stopped
+
+  pyroscope-secondary:
+    image: grafana/pyroscope:latest
+    profiles: ["alloy"]
+    restart: unless-stopped
+
+  fault-receiver:
+    image: oven/bun:1.3
+    profiles: ["faults"]
+    working_dir: /app
+    command: ["bun", "dev/faults/server.ts"]
+    environment:
+      - UPSTREAM_URL=http://pyroscope:4040
+    ports:
+      - "${FAULT_PORT:-4043}:4040"
+    volumes:
+      - ..:/app
+      - /app/node_modules
+    depends_on:
+      - pyroscope
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    profiles: ["otlp"]
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+      - --feature-gates=service.profilesSupport
+    ports:
+      - "${OTLP_PORT:-4318}:4318"
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    restart: unless-stopped

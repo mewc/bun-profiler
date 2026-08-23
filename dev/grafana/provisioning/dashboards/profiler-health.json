@@ -1,0 +1,66 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "bun_profiler_capture_gap_seconds", "legendFormat": "last gap", "refId": "A" },
+        { "expr": "bun_profiler_capture_gap_max_seconds", "legendFormat": "maximum gap", "refId": "B" }
+      ],
+      "title": "Sampling blind spot",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "rate(bun_profiler_exported_profiles_total[1m])", "legendFormat": "{{exporter}} success", "refId": "A" },
+        { "expr": "rate(bun_profiler_export_failures_total[1m])", "legendFormat": "{{exporter}} failures", "refId": "B" }
+      ],
+      "title": "Exporter throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "id": 3,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        { "expr": "bun_profiler_export_queue_depth", "legendFormat": "{{exporter}} queued", "refId": "A" },
+        { "expr": "bun_profiler_export_dropped_total", "legendFormat": "{{exporter}} dropped", "refId": "B" }
+      ],
+      "title": "Backpressure",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "dateTimeAsIso" }, "overrides": [] },
+      "gridPos": { "h": 5, "w": 8, "x": 0, "y": 8 },
+      "id": 4,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "values": false } },
+      "targets": [
+        { "expr": "bun_profiler_export_last_success_unixtime * 1000", "legendFormat": "{{exporter}}", "refId": "A" }
+      ],
+      "title": "Last successful export",
+      "type": "stat"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["bun-profiler", "health"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timezone": "browser",
+  "title": "bun-profiler health",
+  "uid": "bun-profiler-health",
+  "version": 1
+}

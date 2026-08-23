@@ -33,6 +33,8 @@ mock.module("node:inspector/promises", () => ({
   },
 }));
 
+import { ProfilerConcurrencyError } from "../src/errors";
+import { callbackExporter } from "../src/exporters";
 import { BunPyroscope } from "../src/profiler";
 
 // ---------- Mock fetch ----------
@@ -344,6 +346,33 @@ describe("stop()", () => {
     profiler = null;
     expect(_disconnectCalls).toBe(0);
   });
+
+  it("coalesces concurrent stop calls", async () => {
+    profiler = new BunPyroscope(BASE);
+    await profiler.start();
+    await Promise.all([profiler.stop(), profiler.stop()]);
+    profiler = null;
+    expect(_postCalls.filter((call) => call.method === "Profiler.stop")).toHaveLength(1);
+    expect(_disconnectCalls).toBe(1);
+  });
+
+  it("drops an exporter that ignores abort after the shutdown deadline", async () => {
+    profiler = new BunPyroscope({
+      appName: "shutdown-timeout",
+      pushIntervalMs: 60_000,
+      shutdownTimeoutMs: 15,
+      exporters: [callbackExporter("hung", () => new Promise<void>(() => undefined))],
+    });
+    await profiler.start();
+    const started = performance.now();
+    await profiler.stop();
+    const elapsed = performance.now() - started;
+    const stats = profiler.stats();
+    profiler = null;
+    expect(elapsed).toBeLessThan(100);
+    expect(stats.exporters.hung?.droppedProfiles).toBe(1);
+    expect(_disconnectCalls).toBe(1);
+  });
 });
 
 // ---------- ingest URL shape ----------
@@ -539,6 +568,108 @@ describe("push interval timer", () => {
     const startCalls = _postCalls.filter((c) => c.method === "Profiler.start");
     expect(startCalls.length).toBeGreaterThanOrEqual(1);
   });
+
+  it("restarts sampling before exporter work begins", async () => {
+    const events: string[] = [];
+    _postFn = async (method: string) => {
+      if (method === "Profiler.stop") {
+        events.push("stop");
+        return { profile: cpuProfile() };
+      }
+      if (method === "Profiler.start") events.push("start");
+      return {};
+    };
+    profiler = new BunPyroscope({
+      appName: "order-test",
+      pushIntervalMs: 15,
+      maxRetries: 0,
+      exporters: [callbackExporter("ordering", () => events.push("export"))],
+    });
+    await profiler.start();
+    events.length = 0;
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    const stop = events.indexOf("stop");
+    const restart = events.indexOf("start", stop + 1);
+    const exported = events.indexOf("export");
+    expect(stop).toBeGreaterThanOrEqual(0);
+    expect(restart).toBeGreaterThan(stop);
+    expect(exported).toBeGreaterThan(restart);
+  });
+
+  it("can lower the sampling rate between idle windows", async () => {
+    profiler = new BunPyroscope({
+      ...BASE,
+      pushIntervalMs: 15,
+      adaptiveSampling: {
+        enabled: true,
+        busyIntervalUs: 5_000,
+        idleIntervalUs: 50_000,
+        busyThreshold: 0.25,
+      },
+    });
+    await profiler.start();
+    _postCalls.length = 0;
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    const methods = _postCalls.map((call) => call.method);
+    const stopIndex = methods.indexOf("Profiler.stop");
+    const intervalIndex = methods.indexOf("Profiler.setSamplingInterval");
+    const startIndex = methods.indexOf("Profiler.start");
+    expect(intervalIndex).toBeGreaterThan(stopIndex);
+    expect(startIndex).toBeGreaterThan(intervalIndex);
+    expect(_postCalls[intervalIndex]?.params).toEqual({ interval: 50_000 });
+    expect(profiler.stats().samplingIntervalChanges).toBe(1);
+  });
+});
+
+describe("profiler concurrency", () => {
+  it("rejects a second active profiler in the same isolate", async () => {
+    profiler = new BunPyroscope(BASE);
+    await profiler.start();
+    const second = new BunPyroscope(BASE);
+    await expect(second.start()).rejects.toBeInstanceOf(ProfilerConcurrencyError);
+  });
+
+  it("rejects overlapping tag calls", async () => {
+    profiler = new BunPyroscope(BASE);
+    await profiler.start();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = profiler.tag({ job: "first" }, () => held);
+    await Promise.resolve();
+    await expect(profiler.tag({ job: "second" }, () => undefined)).rejects.toBeInstanceOf(
+      ProfilerConcurrencyError
+    );
+    release();
+    await first;
+  });
+});
+
+describe("multiple exporters", () => {
+  it("isolates destination failures and reports per-exporter stats", async () => {
+    let accepted = 0;
+    profiler = new BunPyroscope({
+      appName: "multi",
+      pushIntervalMs: 60_000,
+      maxRetries: 0,
+      exporters: [
+        callbackExporter("broken", () => {
+          throw new Error("offline");
+        }),
+        callbackExporter("healthy", () => {
+          accepted++;
+        }),
+      ],
+    });
+    await profiler.start();
+    await profiler.stop();
+    const stats = profiler.stats();
+    profiler = null;
+    expect(accepted).toBe(1);
+    expect(stats.exporters.broken?.failedProfiles).toBe(1);
+    expect(stats.exporters.healthy?.exportedProfiles).toBe(1);
+  });
 });
 
 // ---------- unavailable inspector ----------
@@ -593,6 +724,64 @@ describe("start() when node:inspector/promises is unavailable", () => {
 // ---------- push failure ----------
 
 describe("push failure handling", () => {
+  it("aborts a hung request at the per-attempt deadline", async () => {
+    (globalThis as unknown as { fetch: unknown }).fetch = mock(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        })
+    );
+
+    profiler = new BunPyroscope({
+      ...BASE,
+      exportTimeoutMs: 5,
+      shutdownTimeoutMs: 100,
+      maxRetries: 0,
+    });
+    await profiler.start();
+    await profiler.stop();
+    const stats = profiler.stats();
+    profiler = null;
+
+    expect(stats.exporters.pyroscope?.failedProfiles).toBe(1);
+    expect(stats.exporters.pyroscope?.lastError).toContain("timed out after 5ms");
+    (globalThis as unknown as { fetch: unknown }).fetch = _fetchMock;
+  });
+
+  it("retries a timed-out request and can recover", async () => {
+    let attempts = 0;
+    (globalThis as unknown as { fetch: unknown }).fetch = mock(
+      (_input: RequestInfo | URL, init?: RequestInit) => {
+        attempts++;
+        if (attempts > 1) return Promise.resolve(new Response("ok", { status: 200 }));
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        });
+      }
+    );
+
+    profiler = new BunPyroscope({
+      ...BASE,
+      exportTimeoutMs: 5,
+      shutdownTimeoutMs: 2_000,
+      maxRetries: 1,
+    });
+    await profiler.start();
+    await profiler.stop();
+    const stats = profiler.stats();
+    profiler = null;
+
+    expect(attempts).toBe(2);
+    expect(stats.exporters.pyroscope?.retries).toBe(1);
+    expect(stats.exporters.pyroscope?.exportedProfiles).toBe(1);
+    expect(stats.exporters.pyroscope?.failedProfiles).toBe(0);
+    (globalThis as unknown as { fetch: unknown }).fetch = _fetchMock;
+  });
+
   it("drops the window and continues profiling when push fails with 5xx", async () => {
     let fetchCallCount = 0;
     (globalThis as unknown as { fetch: unknown }).fetch = mock(() => {

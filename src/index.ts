@@ -1,5 +1,7 @@
 // The converters are exported so callers can post-process or inspect profiles
 // themselves; only convertToFoldedWallTime used to be, which was inconsistent.
+
+export { optionsFromEnv, parseLabels } from "./config.js";
 export {
   calculateSampleRate,
   convertHeapToFolded,
@@ -7,14 +9,35 @@ export {
   convertToFoldedWallTime,
   IDLE_FRAME,
 } from "./converter.js";
+export {
+  ExporterError,
+  ExportQueueError,
+  ProfilerConcurrencyError,
+  ProfilerConfigError,
+} from "./errors.js";
+export { callbackExporter, pprofFileExporter, pyroscopeExporter } from "./exporters.js";
+export { captureHeapSnapshot } from "./memory.js";
+export { renderPrometheusMetrics } from "./metrics.js";
+export { decodePprof, encodePprof } from "./pprof.js";
 export { BunPyroscope } from "./profiler.js";
+export type { PprofPullHandlerOptions } from "./pull.js";
+export { createPprofHandler } from "./pull.js";
+export { SourceMapResolver } from "./source-maps.js";
+export { convertToSpeedscope } from "./speedscope.js";
 export type {
   BunPyroscopeOptions,
   CdpCallFrame,
   CdpNode,
   CdpProfile,
+  ExporterStats,
   HeapProfileNode,
+  PprofEncodeOptions,
+  PprofFileExporterOptions,
+  ProfileExporter,
   ProfilerStats,
+  ProfileType,
+  ProfileWindow,
+  PyroscopeExporterOptions,
   SamplingHeapProfile,
 } from "./types.js";
 
@@ -31,6 +54,14 @@ import type { BunPyroscopeOptions } from "./types.js";
  */
 export function startProfiling(options: BunPyroscopeOptions): BunPyroscope {
   const profiler = new BunPyroscope(options);
+  profiler.start().catch((err: unknown) => {
+    console.warn("[bun-profiler] Failed to start profiling:", err);
+  });
+  return profiler;
+}
+
+export function startProfilingFromEnv(overrides: Partial<BunPyroscopeOptions> = {}): BunPyroscope {
+  const profiler = BunPyroscope.fromEnv(overrides);
   profiler.start().catch((err: unknown) => {
     console.warn("[bun-profiler] Failed to start profiling:", err);
   });
