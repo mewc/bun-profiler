@@ -15,21 +15,49 @@ run_mode = "concurrent"
 command = "dev/up.sh"
 default = true
 icon = "flame"
+available_in = [ "local" ]
 
 [scripts.run.demo]
 # Same stack, then drives 60s of traffic so the flamegraphs aren't empty.
 command = "dev/up.sh --load"
 icon = "rocket"
+available_in = [ "local" ]
 
 [scripts.run.load]
 command = "dev/loadgen.sh 120"
 icon = "activity"
+available_in = [ "local" ]
+
+[scripts.run.alloy]
+command = "dev/up.sh --alloy"
+icon = "route"
+available_in = [ "local" ]
+
+[scripts.run.failures]
+command = "dev/failures.sh"
+icon = "triangle-alert"
+available_in = [ "local" ]
+
+[scripts.run.workers]
+command = "dev/workers.sh"
+icon = "network"
+available_in = [ "local" ]
+
+[scripts.run.otlp]
+command = "dev/up.sh --otlp"
+icon = "beaker"
+available_in = [ "local" ]
+
+[scripts.run.bench]
+command = "dev/bench.sh"
+icon = "gauge"
 
 [scripts.run.screenshots]
 # Drives the running stack with Playwright and regenerates the README images.
 # Fails if a dashboard panel is empty, so it doubles as an end-to-end check.
 command = "bun run screenshots"
 icon = "camera"
+available_in = [ "local" ]
 
 [scripts.run.test]
 command = "bun test --watch"

@@ -1,4 +1,5 @@
 import { hostname } from "node:os";
+import { isMainThread, threadId } from "node:worker_threads";
 
 /**
  * Resolve the application name.
@@ -45,6 +46,8 @@ export function buildDefaultLabels(appName: string): Record<string, string> {
     service_name: appName,
   };
 
+  if (!isMainThread) labels.worker_id = String(threadId);
+
   const env = process.env.NODE_ENV ?? process.env.BUN_ENV;
   if (env) labels.environment = env;
 
@@ -70,7 +73,7 @@ export function buildDefaultLabels(appName: string): Record<string, string> {
 export function encodePyroscopeName(
   appName: string,
   labels: Record<string, string>,
-  type = "cpu"
+  type: string | null = "cpu"
 ): string {
   // The app name shares the `name` param with the labels, so it needs the same
   // escaping. A scoped package name ("@acme/api" — the npm_package_name
@@ -80,7 +83,8 @@ export function encodePyroscopeName(
   const safeAppName = appName.replace(/[{}=,\s]/g, "_");
 
   const entries = Object.entries(labels);
-  if (entries.length === 0) return `${safeAppName}.${type}`;
+  const prefix = type ? `${safeAppName}.${type}` : safeAppName;
+  if (entries.length === 0) return prefix;
 
   entries.sort(([a], [b]) => a.localeCompare(b));
   const labelStr = entries
@@ -91,5 +95,5 @@ export function encodePyroscopeName(
     })
     .join(",");
 
-  return `${safeAppName}.${type}{${labelStr}}`;
+  return `${prefix}{${labelStr}}`;
 }

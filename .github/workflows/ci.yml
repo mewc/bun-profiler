@@ -8,14 +8,18 @@ on:
 
 jobs:
   ci:
-    name: Typecheck, lint, test, build
+    name: Bun ${{ matrix.bun-version }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bun-version: ["1.3.7", "latest"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: ${{ matrix.bun-version }}
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -25,3 +29,61 @@ jobs:
 
       - name: Build
         run: bun run build
+
+      - name: Runtime smoke
+        run: bun test/runtime-smoke.mjs
+
+      - name: Worker preload and graceful shutdown smoke
+        if: matrix.bun-version == 'latest'
+        run: |
+          bun test/worker-preload-smoke.ts
+          bun test/graceful-shutdown-smoke.ts
+
+      - name: Independent pprof decoder smoke
+        if: matrix.bun-version == 'latest'
+        run: |
+          bun test/pprof-smoke.mjs /tmp/bun-profiler.pb.gz
+          go tool pprof -top /tmp/bun-profiler.pb.gz | grep independentPprofSmoke
+
+  node-smoke:
+    name: Node heap compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: node test/runtime-smoke.mjs
+
+  integration:
+    name: Pyroscope and Alloy smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Start Alloy fan-out stack
+        run: dev/up.sh --alloy
+      - name: Generate profiles
+        run: dev/loadgen.sh 15
+      - name: Send pprof to real Pyroscope
+        run: |
+          PYROSCOPE_FORMAT=pprof PYROSCOPE_TARGET_URL=http://pyroscope:4040 dev/compose.sh --profile alloy up -d --force-recreate app
+          dev/loadgen.sh 10
+      - name: Verify profiler health metrics
+        run: |
+          curl -fsS http://localhost:3002/health
+          curl -fsS http://localhost:3002/metrics | grep bun_profiler_exported_profiles_total
+      - name: Compose logs
+        if: failure()
+        run: dev/compose.sh --profile alloy logs --tail 100
+      - name: Stop stack
+        if: always()
+        run: dev/compose.sh --profile alloy down -v --remove-orphans

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bring up the demo stack, then wait until it is actually serving.
 #
-# Usage: dev/up.sh [--no-build] [--load]
+# Usage: dev/up.sh [--no-build] [--load] [--alloy] [--faults] [--otlp]
 #   --no-build  skip the image build (faster when only source changed)
 #   --load      drive 60s of traffic once the stack is up
 
@@ -13,10 +13,14 @@ source ./_env.sh
 
 BUILD_ARG="--build"
 RUN_LOAD=0
+COMPOSE_PROFILE=""
 for arg in "$@"; do
   case "$arg" in
     --no-build) BUILD_ARG="" ;;
     --load) RUN_LOAD=1 ;;
+    --alloy) COMPOSE_PROFILE="alloy"; export PYROSCOPE_TARGET_URL="http://alloy:9999" ;;
+    --faults) COMPOSE_PROFILE="faults"; export PYROSCOPE_TARGET_URL="http://fault-receiver:4040" ;;
+    --otlp) COMPOSE_PROFILE="otlp"; export OTLP_PROFILES_URL="http://otel-collector:4318" ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -46,7 +50,7 @@ project_holding_port() {
 # project holding it is definitively ours and safe to retire.
 preflight_ports() {
   local conflicts=() proj port
-  for port in "$APP_PORT" "$GRAFANA_PORT" "$PYROSCOPE_PORT" "$PROMETHEUS_PORT"; do
+  for port in "$APP_PORT" "$GRAFANA_PORT" "$PYROSCOPE_PORT" "$PROMETHEUS_PORT" "$ALLOY_PORT" "$FAULT_PORT" "$OTLP_PORT" "$WORKER_PORT"; do
     while read -r proj; do
       [[ -z "$proj" || "$proj" == "$OURS" ]] && continue
       conflicts+=("$proj")
@@ -62,10 +66,10 @@ preflight_ports() {
   while read -r proj; do
     [[ -z "$proj" ]] && continue
     if [[ "$proj" == "${COMPOSE_PROJECT_PREFIX}"* ]]; then
-      echo "Port block ${APP_PORT}-${PROMETHEUS_PORT} is held by a stale stack of ours ('${proj}') — retiring it."
+      echo "Port block ${APP_PORT}-${WORKER_PORT} is held by a stale stack of ours ('${proj}') — retiring it."
       docker compose -p "$proj" down -v --remove-orphans >/dev/null 2>&1 || true
     else
-      echo "error: '${proj}' is already using a port in ${APP_PORT}-${PROMETHEUS_PORT} and is not ours." >&2
+      echo "error: '${proj}' is already using a port in ${APP_PORT}-${WORKER_PORT} and is not ours." >&2
       blocked=1
     fi
   done <<< "$unique"
@@ -82,7 +86,11 @@ preflight_ports
 echo "Starting ${OURS} on ports ${APP_PORT}/${GRAFANA_PORT}/${PYROSCOPE_PORT}/${PROMETHEUS_PORT} …"
 
 # shellcheck disable=SC2086 # BUILD_ARG is intentionally word-split (may be empty)
-docker compose up $BUILD_ARG -d --remove-orphans
+if [[ -n "$COMPOSE_PROFILE" ]]; then
+  docker compose --profile "$COMPOSE_PROFILE" up $BUILD_ARG -d --remove-orphans
+else
+  docker compose up $BUILD_ARG -d --remove-orphans
+fi
 
 # Wait for the app rather than declaring success the moment Compose returns —
 # the container still has to boot and connect to Pyroscope.
@@ -110,6 +118,8 @@ cat <<EOF
   Grafana:     http://localhost:${GRAFANA_PORT}/d/bun-profiler-demo
   Pyroscope:   http://localhost:${PYROSCOPE_PORT}
   Prometheus:  http://localhost:${PROMETHEUS_PORT}
+  Alloy debug: http://localhost:${ALLOY_PORT} (when --alloy is active)
+  OTLP/HTTP:   http://localhost:${OTLP_PORT} (when --otlp is active)
 
 EOF
 

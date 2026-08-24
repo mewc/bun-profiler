@@ -1,8 +1,4 @@
-/**
- * CDP (Chrome DevTools Protocol) types — the format returned by
- * node:inspector's Profiler.stop() on Bun (JavaScriptCore).
- */
-
+/** Chrome DevTools Protocol profile types returned by node:inspector. */
 export interface CdpCallFrame {
   functionName: string;
   scriptId: string;
@@ -15,16 +11,9 @@ export interface CdpNode {
   id: number;
   callFrame: CdpCallFrame;
   hitCount?: number;
-  /** IDs of child nodes in the call tree */
   children?: number[];
 }
 
-/**
- * Full CDP CPU profile as returned by Profiler.stop().
- * startTime and endTime are in microseconds since an arbitrary epoch.
- * samples[i] is the leaf node ID for sample i.
- * timeDeltas[i] is microseconds elapsed since the previous sample.
- */
 export interface CdpProfile {
   nodes: CdpNode[];
   startTime: number;
@@ -33,9 +22,6 @@ export interface CdpProfile {
   timeDeltas: number[];
 }
 
-/**
- * A node in a V8 sampling heap profile tree.
- */
 export interface HeapProfileNode {
   callFrame: CdpCallFrame;
   selfSize: number;
@@ -43,156 +29,177 @@ export interface HeapProfileNode {
   children: HeapProfileNode[];
 }
 
-/**
- * Sampling heap profile as returned by HeapProfiler.stopSampling().
- */
 export interface SamplingHeapProfile {
   head: HeapProfileNode;
 }
 
+export type ProfileType = "cpu" | "wall" | "alloc_space";
+
 /**
- * Constructor options for BunPyroscope.
+ * An immutable completed profiling window delivered to exporters.
+ *
+ * The wrapper and labels are frozen. The CDP payload is treated as readonly but
+ * is not recursively frozen because doing that on every window would itself add
+ * measurable profiler overhead.
  */
-export interface BunPyroscopeOptions {
-  /**
-   * Full URL of the Pyroscope server, e.g. "http://localhost:4040"
-   */
-  pyroscopeUrl: string;
+export interface ProfileWindow {
+  readonly type: ProfileType;
+  readonly appName: string;
+  readonly labels: Readonly<Record<string, string>>;
+  readonly from: number;
+  readonly until: number;
+  readonly sampleRate: number;
+  readonly sampleIntervalUs: number;
+  readonly folded: string;
+  readonly profile: CdpProfile | SamplingHeapProfile;
+}
 
-  /**
-   * Application name for the profile stream.
-   * Falls back to SERVICE_NAME env var, then npm_package_name env var, then "bun-app".
-   */
-  appName?: string;
+/** A destination that receives completed windows. Calls are serialized per exporter. */
+export interface ProfileExporter {
+  /** Stable identifier used in stats and Prometheus labels. */
+  readonly name: string;
+  export(window: ProfileWindow, signal?: AbortSignal): Promise<void>;
+  shutdown?(): Promise<void>;
+}
 
-  /**
-   * How often the profiler samples the call stack, in microseconds.
-   * Passed directly to Profiler.setSamplingInterval.
-   * Default: 10000 (10ms).
-   */
-  sampleIntervalUs?: number;
+export type PyroscopeFormat = "folded" | "pprof";
 
-  /**
-   * How often to stop, flush, and restart the profiler, in milliseconds.
-   * Default: 15000 (15 seconds).
-   */
-  pushIntervalMs?: number;
-
-  /**
-   * Extra labels merged with (and overriding) auto-detected defaults.
-   */
-  labels?: Record<string, string>;
-
-  /**
-   * Bearer token for Pyroscope authentication.
-   * Produces header: Authorization: Bearer <token>
-   */
+export interface PyroscopeExporterOptions {
+  url: string;
   authToken?: string;
-
-  /**
-   * Basic auth credentials.
-   * Produces header: Authorization: Basic base64(username:password)
-   */
-  basicAuth?: {
-    username: string;
-    password: string;
-  };
-
-  /**
-   * Number of times to retry a failed push before dropping the window.
-   * Profiling continues regardless of push failures.
-   * Default: 2
-   */
-  maxRetries?: number;
-
-  /**
-   * Whether to log debug information to stderr.
-   * Default: false
-   */
-  debug?: boolean;
-
-  /**
-   * Whether to gzip-compress the request body before pushing to Pyroscope.
-   *
-   * Default: false.
-   *
-   * Leave this off unless you have confirmed your server accepts it. Grafana
-   * Pyroscope's `/ingest` endpoint does not decompress `format=folded` bodies:
-   * verified against `grafana/pyroscope:latest`, a gzipped body is answered
-   * with HTTP 200 and then stored as an empty profile. The failure is
-   * invisible — pushes look successful and no data ever appears.
-   */
+  basicAuth?: { username: string; password: string };
+  tenantId?: string;
+  headers?: Record<string, string>;
+  /** pprof is currently CPU-only; wall and allocation windows remain folded. */
+  format?: PyroscopeFormat;
+  /** Gzip folded bodies. Off by default because legacy /ingest may silently discard them. */
   compress?: boolean;
+  /** Abort one HTTP attempt after this duration. Default: 10000. */
+  timeoutMs?: number;
+  name?: string;
+}
 
-  /**
-   * Heap allocation sampling options (opt-in).
-   */
-  heap?: {
-    enabled: boolean;
-    /** Bytes between samples. Default: 32768 (32 KB, V8 default). */
-    samplingIntervalBytes?: number;
-  };
+export interface PprofFileExporterOptions {
+  directory: string;
+  /** File format. pprof files are gzip-compressed protobuf. */
+  format?: "pprof" | "cpuprofile" | "speedscope";
+  name?: string;
+}
 
-  /**
-   * Wall-time profiling options (opt-in).
-   *
-   * When enabled, pushes an additional "wall" profile stream alongside CPU.
-   * Wall-time profiles weight stacks by elapsed wall-clock microseconds
-   * (via CDP timeDeltas) rather than sample count, and keep "(idle)" frames
-   * visible so I/O wait time appears in flamegraphs.
-   *
-   * This is the highest-value profiling mode for I/O-heavy servers that spend
-   * most time waiting on external APIs, databases, or network calls.
-   */
-  wallTime?: {
+export interface BunPyroscopeOptions {
+  /** Existing shorthand destination. Required unless exporters are supplied. */
+  pyroscopeUrl?: string;
+  appName?: string;
+  sampleIntervalUs?: number;
+  pushIntervalMs?: number;
+  labels?: Record<string, string>;
+  authToken?: string;
+  basicAuth?: { username: string; password: string };
+  tenantId?: string;
+  /** Additional request headers for the shorthand Pyroscope destination. */
+  headers?: Record<string, string>;
+  maxRetries?: number;
+  maxPendingWindows?: number;
+  shutdownTimeoutMs?: number;
+  /** Per-attempt deadline for the shorthand Pyroscope exporter. Default: 10000. */
+  exportTimeoutMs?: number;
+  debug?: boolean;
+  compress?: boolean;
+  /** Encoding used by the shorthand Pyroscope destination. Default: folded. */
+  pyroscopeFormat?: PyroscopeFormat;
+  /** Explicit destinations. A pyroscopeUrl, when also present, is added first. */
+  exporters?: readonly ProfileExporter[];
+  heap?: { enabled: boolean; samplingIntervalBytes?: number };
+  wallTime?: { enabled: boolean };
+  sourceMaps?: { enabled: boolean; cacheSize?: number };
+  adaptiveSampling?: {
     enabled: boolean;
+    busyIntervalUs?: number;
+    idleIntervalUs?: number;
+    /** Fraction of expected samples that selects the busy interval. Default: 0.25. */
+    busyThreshold?: number;
   };
 }
 
-/**
- * A snapshot of what the profiler has actually managed to do.
- *
- * Continuous profiling fails quietly by nature: it runs in the background, and
- * a broken push looks exactly like an idle process — no data either way. Expose
- * this from a health endpoint so a profiler that has stopped delivering is
- * visible rather than merely absent.
- *
- * It reports what the transport did, so it catches a dead loop and rejected
- * pushes. It cannot catch a server that accepts a push and then stores nothing.
- */
-export interface ProfilerStats {
-  /** Whether the push loop is currently active. */
-  running: boolean;
-  /** Windows accepted by the server. */
-  pushedWindows: number;
-  /** Windows dropped after exhausting retries. */
-  failedWindows: number;
-  /**
-   * Windows that produced no samples and were skipped. Entirely normal for an
-   * idle process; a count that tracks pushedWindows means the profiler isn't
-   * seeing your workload.
-   */
-  emptyWindows: number;
-  /** ms since epoch of the last accepted push, or null if none has succeeded. */
-  lastPushAt: number | null;
-  /** Message from the most recent failure, or null. */
+export interface ExporterStats {
+  exportedProfiles: number;
+  failedProfiles: number;
+  retries: number;
+  droppedProfiles: number;
+  queueDepth: number;
+  inFlight: boolean;
+  lastSuccessAt: number | null;
   lastError: string | null;
-  /** Profile types being pushed, e.g. ["cpu", "wall"]. */
-  streams: string[];
+  lastExportDurationMs: number | null;
+  exportedBytes: number;
 }
 
-/** Internal fully-resolved configuration with all defaults applied. */
+export interface ProfilerMemoryStats {
+  rssBytes: number;
+  heapUsedBytes: number;
+  heapTotalBytes: number;
+  externalBytes: number;
+  /** Bun/JSC values are present only when bun:jsc.heapStats is available. */
+  jscHeapSizeBytes?: number;
+  jscHeapCapacityBytes?: number;
+  jscExtraMemorySizeBytes?: number;
+}
+
+export interface ProfilerStats {
+  running: boolean;
+  /** Backwards-compatible aggregate exporter success count. */
+  pushedWindows: number;
+  /** Backwards-compatible aggregate final failure count. */
+  failedWindows: number;
+  emptyWindows: number;
+  lastPushAt: number | null;
+  lastError: string | null;
+  streams: string[];
+  capturedWindows: number;
+  capturedSamples: number;
+  captureFailures: number;
+  lastCaptureGapMs: number | null;
+  maxCaptureGapMs: number;
+  lastConversionDurationMs: number | null;
+  currentSampleIntervalUs: number;
+  samplingIntervalChanges: number;
+  exporters: Record<string, ExporterStats>;
+  memory: ProfilerMemoryStats;
+}
+
 export interface ResolvedConfig {
-  pyroscopeUrl: string;
+  pyroscopeUrl: string | undefined;
   appName: string;
   sampleIntervalUs: number;
   pushIntervalMs: number;
   labels: Record<string, string>;
   authToken: string | undefined;
   basicAuth: { username: string; password: string } | undefined;
+  tenantId: string | undefined;
+  headers: Record<string, string>;
   maxRetries: number;
+  maxPendingWindows: number;
+  shutdownTimeoutMs: number;
+  exportTimeoutMs: number;
   debug: boolean;
   compress: boolean;
+  pyroscopeFormat: PyroscopeFormat;
+  exporters: readonly ProfileExporter[];
   heap: { enabled: boolean; samplingIntervalBytes: number };
   wallTime: { enabled: boolean };
+  sourceMaps: { enabled: boolean; cacheSize: number };
+  adaptiveSampling: {
+    enabled: boolean;
+    busyIntervalUs: number;
+    idleIntervalUs: number;
+    busyThreshold: number;
+  };
+}
+
+export interface PprofEncodeOptions {
+  sampleIntervalUs?: number;
+  /** UNIX time in nanoseconds. Defaults to the current time. */
+  timeNanos?: string | number;
+  /** Profile duration in nanoseconds. Defaults to the CDP duration. */
+  durationNanos?: string | number;
 }

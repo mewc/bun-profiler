@@ -11,13 +11,21 @@ if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
   : "${GRAFANA_PORT:=$((CONDUCTOR_PORT + 1))}"
   : "${PYROSCOPE_PORT:=$((CONDUCTOR_PORT + 2))}"
   : "${PROMETHEUS_PORT:=$((CONDUCTOR_PORT + 3))}"
+  : "${ALLOY_PORT:=$((CONDUCTOR_PORT + 4))}"
+  : "${FAULT_PORT:=$((CONDUCTOR_PORT + 5))}"
+  : "${OTLP_PORT:=$((CONDUCTOR_PORT + 6))}"
+  : "${WORKER_PORT:=$((CONDUCTOR_PORT + 7))}"
 else
   : "${APP_PORT:=3002}"
   : "${GRAFANA_PORT:=3003}"
   : "${PYROSCOPE_PORT:=4042}"
   : "${PROMETHEUS_PORT:=9091}"
+  : "${ALLOY_PORT:=12346}"
+  : "${FAULT_PORT:=4043}"
+  : "${OTLP_PORT:=4318}"
+  : "${WORKER_PORT:=3004}"
 fi
-export APP_PORT GRAFANA_PORT PYROSCOPE_PORT PROMETHEUS_PORT
+export APP_PORT GRAFANA_PORT PYROSCOPE_PORT PROMETHEUS_PORT ALLOY_PORT FAULT_PORT OTLP_PORT WORKER_PORT
 
 # Identify the project by the workspace DIRECTORY, not CONDUCTOR_WORKSPACE_NAME.
 # Conductor renames a workspace to follow its branch, but leaves the worktree

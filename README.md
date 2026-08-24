@@ -53,7 +53,7 @@ await profiler.stop(); // flushes final profile before disconnecting
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `pyroscopeUrl` | `string` | **required** | Pyroscope server URL |
+| `pyroscopeUrl` | `string` | — | Pyroscope server URL; required unless `exporters` is set |
 | `appName` | `string` | `SERVICE_NAME` env / `npm_package_name` / `"bun-app"` | Application name |
 | `sampleIntervalUs` | `number` | `10000` (10ms) | Sampling interval in microseconds |
 | `pushIntervalMs` | `number` | `15000` (15s) | How often to flush profiles |
@@ -61,12 +61,60 @@ await profiler.stop(); // flushes final profile before disconnecting
 | `authToken` | `string` | — | Bearer token for auth |
 | `basicAuth` | `{ username, password }` | — | Basic auth credentials |
 | `maxRetries` | `number` | `2` | Push retry attempts before dropping window |
+| `maxPendingWindows` | `number` | `2` | Bounded pending queue depth per exporter; oldest waiting window is evicted |
+| `shutdownTimeoutMs` | `number` | `10000` | Maximum time `stop()` waits for exporters before dropping pending work |
+| `exportTimeoutMs` | `number` | `10000` | Per-attempt HTTP deadline for the shorthand Pyroscope exporter |
+| `tenantId` | `string` | — | Grafana/Pyroscope `X-Scope-OrgID` tenant |
+| `headers` | `Record<string, string>` | `{}` | Safe additional request headers |
+| `exporters` | `ProfileExporter[]` | — | Independent file, callback, Pyroscope, or custom destinations |
+| `pyroscopeFormat` | `"folded" \| "pprof"` | `"folded"` | Pyroscope CPU encoding; pprof is opt-in during 0.x |
 | `compress` | `boolean` | `false` | Gzip the request body — see the warning below |
 | `debug` | `boolean` | `false` | Log debug info to stderr |
 | `wallTime` | `{ enabled: boolean }` | `{ enabled: false }` | Wall-time profiling (opt-in) |
 | `heap` | `{ enabled, samplingIntervalBytes? }` | `{ enabled: false }` | Heap allocation profiling (opt-in) |
+| `sourceMaps` | `{ enabled, cacheSize? }` | `{ enabled: false }` | Resolve bundled-JS frames with a bounded map cache |
+| `adaptiveSampling` | `{ enabled, ... }` | `{ enabled: false }` | Experimental between-window sampling adjustment |
 
 > **Don't enable `compress` unless you've confirmed your server accepts it.** Grafana Pyroscope's `/ingest` endpoint does not decompress `format=folded` bodies. Verified against `grafana/pyroscope:latest`: a gzipped body is answered with **HTTP 200** and then stored as an empty profile. Nothing errors, nothing retries, and no data ever appears. It defaults to `false` for that reason.
+
+### Environment-first setup
+
+Container deployments can use the same configuration without an application wrapper:
+
+```ts
+import { startProfilingFromEnv } from "bun-profiler";
+
+const profiler = startProfilingFromEnv({ labels: { component: "api" } });
+```
+
+Explicit overrides win over environment values, which win over defaults. Supported common variables are `PYROSCOPE_SERVER_ADDRESS`, `PYROSCOPE_APPLICATION_NAME`, `PYROSCOPE_LABELS`, `PYROSCOPE_PROFILING_INTERVAL`, `PYROSCOPE_UPLOAD_INTERVAL`, `PYROSCOPE_BASIC_AUTH_USER`, `PYROSCOPE_BASIC_AUTH_PASSWORD`, and `PYROSCOPE_TENANT_ID`. Durations include a unit, for example `10ms`, `15s`, or `2m`.
+
+Library controls use `BUN_PROFILER_*`: `MAX_RETRIES`, `MAX_PENDING_WINDOWS`, `SHUTDOWN_TIMEOUT`, `EXPORT_TIMEOUT`, `DEBUG`, `COMPRESS`, `AUTH_TOKEN`, `PYROSCOPE_FORMAT`, `WALL_TIME_ENABLED`, `HEAP_ENABLED`, `HEAP_SAMPLING_INTERVAL_BYTES`, `SOURCE_MAPS_ENABLED`, `SOURCE_MAP_CACHE_SIZE`, and the `ADAPTIVE_*` variables.
+
+### Exporters and pprof
+
+Each destination has its own sequential, bounded queue. A slow or unavailable backend cannot pause capture or another exporter.
+Retryable failures use capped exponential backoff with equal jitter so replicas do not retry in lockstep. HTTP `Retry-After` is honored in both delay-seconds and date forms, with positive jitter and a five-minute safety ceiling.
+
+```ts
+import {
+  BunPyroscope,
+  callbackExporter,
+  pprofFileExporter,
+  pyroscopeExporter,
+} from "bun-profiler";
+
+const profiler = new BunPyroscope({
+  appName: "orders",
+  exporters: [
+    pyroscopeExporter({ url: "http://pyroscope:4040", format: "pprof" }),
+    pprofFileExporter({ directory: "./profiles" }),
+    callbackExporter("audit", async (window) => console.log(window.from, window.type)),
+  ],
+});
+```
+
+`encodePprof()` emits standards-compatible gzip-compressed `profile.proto`. File exporters also support raw `.cpuprofile` and Speedscope JSON. `ProfileWindow` is immutable at the exporter boundary, and custom exporters implement the small `ProfileExporter` interface.
 
 ## Wall-time profiling
 
@@ -141,6 +189,8 @@ Bun.serve({
 
 This reports what the transport did, so it catches a dead loop and rejected pushes. It cannot catch a server that accepts a push and stores nothing — see the `compress` warning above for the one case where that happens.
 
+`renderPrometheusMetrics(profiler)` exposes the same state without owning an HTTP server: capture gaps and samples, conversion time, per-exporter queue/retry/drop/failure/latency/last-success state, and Bun/Node memory gauges. The examples show plain `Bun.serve`, Hono, and Elysia integration.
+
 ## Tagging a region of code
 
 `tag()` splits the profiling window so a specific block of work gets its own labelled stream — useful for a background job, a migration, or one hot endpoint:
@@ -158,7 +208,7 @@ The work inside runs under `my-service.cpu{job=nightly-report}`, so you can isol
 
 It flushes the current window on entry and exit, so each call costs two extra pushes — use it around meaningful units of work, not per request.
 
-> **Not safe to call concurrently on one instance.** Labels are swapped on shared state, so overlapping `tag()` calls will misattribute each other's samples. For concurrent workloads, use separate `BunPyroscope` instances.
+Overlapping `tag()` calls fail immediately with `ProfilerConcurrencyError`. Do not create another profiler to work around this: Bun exposes one inspector CPU sampler per process, and concurrent sessions corrupt each other's windows. Use bounded, non-overlapping regions or ordinary profile/resource labels for concurrent work.
 
 ## Heap profiling
 
@@ -175,6 +225,51 @@ startProfiling({
 When enabled, an `alloc_space` profile stream is pushed alongside `cpu`.
 
 **Bun limitation:** Bun's JavaScriptCore runtime does not currently implement `HeapProfiler.enable`. When heap profiling is enabled on Bun, the profiler logs a warning and continues with CPU-only profiling. Heap profiling works on Node.js/V8. This will be supported once Bun adds HeapProfiler to their inspector implementation.
+
+Low-cost `process.memoryUsage()` and `bun:jsc.heapStats()` gauges remain available in `stats()` and Prometheus output. Full heap snapshots are deliberately on demand:
+
+```ts
+import { captureHeapSnapshot } from "bun-profiler";
+await captureHeapSnapshot("incident.heapsnapshot");
+```
+
+or `bun-profiler heap-snapshot incident.heapsnapshot`. A snapshot can pause the process and be large, so the library never schedules one periodically.
+
+## Preload, CLI, workers, and pull mode
+
+Use the preload entry point when changing application code is undesirable:
+
+```sh
+PYROSCOPE_SERVER_ADDRESS=http://localhost:4040 \
+PYROSCOPE_APPLICATION_NAME=orders \
+bun --preload bun-profiler/preload src/server.ts
+```
+
+The CLI is equivalent and can capture short-lived commands offline:
+
+```sh
+bun-profiler run --out ./profiles --format pprof -- scripts/import.ts
+```
+
+The preload timer is unreferenced and flushes on `beforeExit`, SIGINT, and SIGTERM, so profiling does not keep a finished script alive.
+
+Workers may select the preload through their `preload` option, and worker streams receive a `worker_id` label. Current Bun releases still expose a process-wide inspector sampler, so only one selected isolate—main or one worker—may profile in a process at a time. `bun run dev:workers` demonstrates the supported pattern and reports the limitation explicitly.
+
+For systems that scrape Go-style endpoints, `createPprofHandler()` provides `/debug/pprof/profile?seconds=N` behavior without creating a server. It coalesces concurrent scrapes and returns `409` when continuous push mode owns the sampler. Pull and push mode are intentionally mutually exclusive.
+
+## Source maps and experimental signals
+
+Directly executed TypeScript already carries original locations in Bun profiles. For bundled JavaScript, `sourceMaps: { enabled: true }` resolves inline or external maps using a bounded cache and falls back to generated positions on any map or filesystem error.
+
+Adaptive sampling is opt-in and only changes the sampling interval between windows. Every change is counted in stats and fixed 100 Hz sampling remains the default.
+
+OTLP Profiles is Alpha. The current OTLP/HTTP JSON exporter therefore lives behind the explicitly unstable entry point and posts to `/v1development/profiles`:
+
+```ts
+import { otlpHttpProfilesExporter } from "bun-profiler/experimental";
+```
+
+It adds window-level resource labels only. The library does not invent per-span or per-request attribution because Bun's sampler does not expose the context needed to associate a CDP sample with an async span.
 
 ## Auto-detected labels
 
@@ -202,6 +297,11 @@ A complete demo stack — Bun app, Pyroscope, Grafana, Prometheus — lives in [
 
 ```sh
 bun run dev:demo   # start everything, then drive 60s of traffic
+bun run dev:alloy  # app -> Alloy receive_http -> two Pyroscope destinations
+bun run dev:failures # 429/500/timeout/recovery fault injection
+bun run dev:workers  # selected worker-isolate fixture
+bun run dev:otlp   # experimental OTLP Profiles -> Collector debug exporter
+bun run bench      # unprofiled/CPU/wall/pprof/worker comparison
 ```
 
 It waits until the stack is serving and prints the URLs — by default
@@ -225,6 +325,7 @@ That contrast is the whole argument for wall-time profiling: the CPU flamegraph 
 Those three images are not hand-captured. `bun run screenshots` drives the live stack with Playwright — clicks "Run all", waits for the profiler to push, generates 90s of mixed traffic, blocks until Prometheus actually returns series, then captures Grafana. It fails if any panel renders "No data" or a result is missing its deep link, so regenerating them is itself an end-to-end test.
 
 See [`dev/README.md`](./dev/README.md) for the full workload list and troubleshooting.
+Deployment constraints, failure modes, Kubernetes environment configuration, migration guidance, and the custom-exporter contract are in [`docs/production.md`](./docs/production.md).
 
 ## Development
 
@@ -237,11 +338,11 @@ bun run build
 ## How it works
 
 1. Connects to Bun's embedded JavaScriptCore inspector via `node:inspector/promises`
-2. Every `pushIntervalMs`: stops the profiler and converts the CDP profile to [folded stacks](https://www.brendangregg.com/FlameGraphs/cpuflamegraphs.html)
-3. Restarts profiling immediately, then gzips and POSTs the window to `/ingest` in the background so the next window isn't blocked on the network
+2. Every `pushIntervalMs`: stops the profiler, immediately starts the next sampling window, and measures that unavoidable stop/start gap
+3. Converts the completed CDP window and hands it to independent bounded exporter queues while sampling has already resumed
 4. On SIGTERM/SIGINT: flushes the current window before exiting
 
-Step 2 does leave a small blind spot: the `Profiler.stop` round trip and the fold pass happen between windows, so work during that gap isn't sampled. It's on the order of milliseconds against a default 15s window, but it isn't zero — profiles are a statistical sample, not an audit log.
+Step 2 still leaves a small unavoidable inspector stop/start blind spot, but conversion, pprof encoding, retries, and network I/O are no longer inside it. `lastCaptureGapMs`, `maxCaptureGapMs`, and the Prometheus gap metrics make the remaining loss observable.
 
 ## Why not `Bun.jsc.profile()`?
 
