@@ -65,7 +65,9 @@ export class BunPyroscope {
       basicAuth: options.basicAuth,
       maxRetries: options.maxRetries ?? 2,
       debug: options.debug ?? false,
-      compress: options.compress ?? true,
+      // Default OFF: Pyroscope /ingest mis-parses gzip'd request bodies as folded
+      // text (HTTP 422 strconv.Atoi) at realistic sizes. See BunPyroscopeOptions.compress.
+      compress: options.compress ?? false,
       heap: {
         enabled: options.heap?.enabled ?? false,
         samplingIntervalBytes: options.heap?.samplingIntervalBytes ?? 32_768,

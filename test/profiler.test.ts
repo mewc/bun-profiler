@@ -456,6 +456,41 @@ describe("auth headers", () => {
   });
 });
 
+// ---------- compression ----------
+
+describe("compression", () => {
+  it("does NOT gzip the body by default (Pyroscope 422s on gzip'd requests)", async () => {
+    profiler = new BunPyroscope(BASE);
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    const calls = _fetchMock.mock.calls as Array<[string, RequestInit]>;
+    expect(calls.length).toBeGreaterThan(0);
+    const headers = calls[0]?.[1]?.headers as Record<string, string>;
+    expect(headers["Content-Encoding"]).toBeUndefined();
+    // Uncompressed body is the plain folded string.
+    expect(typeof calls[0]?.[1]?.body).toBe("string");
+  });
+
+  it("gzips the body and sets Content-Encoding when compress is opted in", async () => {
+    profiler = new BunPyroscope({ ...BASE, compress: true });
+    await profiler.start();
+    await profiler.stop();
+    profiler = null;
+
+    const calls = _fetchMock.mock.calls as Array<[string, RequestInit]>;
+    expect(calls.length).toBeGreaterThan(0);
+    const headers = calls[0]?.[1]?.headers as Record<string, string>;
+    expect(headers["Content-Encoding"]).toBe("gzip");
+    // gzip'd body is bytes, not a string, and starts with the gzip magic 0x1f 0x8b.
+    const body = calls[0]?.[1]?.body as Uint8Array;
+    expect(body).toBeInstanceOf(Uint8Array);
+    expect(body[0]).toBe(0x1f);
+    expect(body[1]).toBe(0x8b);
+  });
+});
+
 // ---------- wall-time profiling ----------
 
 describe("wall-time profiling", () => {

@@ -58,6 +58,7 @@ await profiler.stop(); // flushes final profile before disconnecting
 | `basicAuth` | `{ username, password }` | — | Basic auth credentials |
 | `maxRetries` | `number` | `2` | Push retry attempts before dropping window |
 | `debug` | `boolean` | `false` | Log debug info to stderr |
+| `compress` | `boolean` | `false` | gzip the request body. Off by default — Pyroscope `/ingest` rejects gzip'd requests with `HTTP 422` at realistic sizes (see [Compression](#compression)). Opt in only if your endpoint accepts them |
 | `wallTime` | `{ enabled: boolean }` | `{ enabled: false }` | Wall-time profiling (opt-in) |
 | `heap` | `{ enabled, samplingIntervalBytes? }` | `{ enabled: false }` | Heap allocation profiling (opt-in) |
 
@@ -131,9 +132,23 @@ bun run build
 ## How it works
 
 1. Connects to Bun's embedded JavaScriptCore inspector via `node:inspector/promises`
-2. Every `pushIntervalMs`: stops the profiler, converts the CDP profile to [folded stacks](https://www.brendangregg.com/FlameGraphs/cpuflamegraphs.html), gzip-compresses it, and POSTs to `POST /ingest`
+2. Every `pushIntervalMs`: stops the profiler, converts the CDP profile to [folded stacks](https://www.brendangregg.com/FlameGraphs/cpuflamegraphs.html), and POSTs it (uncompressed by default) to `POST /ingest`
 3. Immediately restarts profiling — no gap in coverage
 4. On SIGTERM/SIGINT: flushes the current window before exiting
+
+## Compression
+
+Request bodies are sent **uncompressed by default** (`compress: false`).
+
+Grafana Pyroscope's `/ingest` endpoint does not reliably decompress gzip'd
+*request* bodies: at realistic profile sizes it parses the raw gzip bytes as
+folded text and rejects the push with `HTTP 422 strconv.Atoi: … invalid syntax`.
+Small bodies occasionally slip through, so with compression on it looks
+*intermittent* — most windows fail, a few succeed. Folded stacks are already
+compact and pushes are infrequent, so uncompressed is both reliable and cheap.
+
+Set `compress: true` only if your ingest endpoint (or a proxy in front of it) is
+known to accept gzip'd request bodies.
 
 ## Why not `Bun.jsc.profile()`?
 

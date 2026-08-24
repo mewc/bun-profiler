@@ -1,0 +1,40 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+# Static gitignored files copied into each new workspace.
+file_include_globs = ".env*\n"
+
+[scripts]
+setup = "bun install"
+
+# Each workspace publishes the demo stack on its own CONDUCTOR_PORT range and
+# runs it under its own Compose project name (see dev/_env.sh), so several
+# workspaces can have the stack up simultaneously without colliding.
+run_mode = "concurrent"
+
+[scripts.run.dev]
+command = "dev/up.sh"
+default = true
+icon = "flame"
+
+[scripts.run.demo]
+# Same stack, then drives 60s of traffic so the flamegraphs aren't empty.
+command = "dev/up.sh --load"
+icon = "rocket"
+
+[scripts.run.load]
+command = "dev/loadgen.sh 120"
+icon = "activity"
+
+[scripts.run.screenshots]
+# Drives the running stack with Playwright and regenerates the README images.
+# Fails if a dashboard panel is empty, so it doubles as an end-to-end check.
+command = "bun run screenshots"
+icon = "camera"
+
+[scripts.run.test]
+command = "bun test --watch"
+icon = "test-tube"
+
+[scripts.run.check]
+command = "bun run l"
+icon = "circle-check"
