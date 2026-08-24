@@ -41,8 +41,24 @@ function isRoot(functionName: string): boolean {
  * URL shortening: strip "file://" prefix, keep last 2 path segments.
  * This avoids /home/user/project/src/... noise in flamegraph labels.
  */
+/**
+ * Strip control characters (C0 + DEL) from a frame label.
+ *
+ * Folded output is newline-delimited records, each ending in " <count>". A raw
+ * newline/carriage-return/tab inside a function name or URL would split one
+ * record into two, and Pyroscope's parser runs `strconv.Atoi` on the token after
+ * the last space — a split leaves a fragment whose tail isn't an integer, which
+ * the /ingest endpoint rejects with `HTTP 422 strconv.Atoi: invalid syntax`.
+ * Replacing controls with a space is safe: Pyroscope splits stack from count on
+ * the *last* space, so interior spaces never affect count parsing.
+ */
+function sanitizeFrameText(s: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — these are exactly the bytes that corrupt folded records.
+  return s.replace(/[\x00-\x1f\x7f]/g, " ");
+}
+
 function frameLabel(callFrame: { functionName: string; url: string; lineNumber: number }): string {
-  const name = callFrame.functionName.trim() || "(anonymous)";
+  const name = sanitizeFrameText(callFrame.functionName).trim() || "(anonymous)";
 
   if (!callFrame.url) return name;
 
@@ -52,6 +68,7 @@ function frameLabel(callFrame: { functionName: string; url: string; lineNumber: 
     const parts = shortUrl.split("/");
     shortUrl = parts.slice(-2).join("/");
   }
+  shortUrl = sanitizeFrameText(shortUrl);
 
   if (callFrame.lineNumber >= 0) {
     return `${name} (${shortUrl}:${callFrame.lineNumber})`;
