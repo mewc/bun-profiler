@@ -1,6 +1,6 @@
 {
   "name": "bun-profiler",
-  "version": "0.4.4",
+  "version": "0.4.3",
   "description": "Continuous CPU profiling for Bun (JavaScriptCore) via Pyroscope/Grafana ingest — zero native dependencies",
   "author": {
     "name": "mewc",
@@ -87,13 +87,13 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.2",
-    "@types/node": "^25.3.0",
+    "@types/node": "^26.2.0",
     "playwright": "^1.62.0",
-    "typescript": "^5.9.3"
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "@jridgewell/trace-mapping": "^0.3.31",
-    "protobufjs": "^7.6.5"
+    "protobufjs": "^8.7.2"
   },
   "engines": {
     "bun": ">=1.3.7"
